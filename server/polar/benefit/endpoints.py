@@ -1,4 +1,5 @@
 from fastapi import Depends, Query
+from pydantic import UUID4
 
 from polar.customer.schemas.customer import CustomerID
 from polar.exceptions import NotPermitted, ResourceNotFound
@@ -25,7 +26,7 @@ from .schemas import (
 )
 from .service import benefit as benefit_service
 
-router = APIRouter(prefix="/benefits", tags=["benefits", APITag.documented])
+router = APIRouter(prefix="/benefits", tags=["benefits", APITag.public])
 
 BenefitNotFound = {
     "description": "Benefit not found.",
@@ -50,6 +51,12 @@ async def list(
     type: MultipleQueryFilter[BenefitType] | None = Query(
         None, title="BenefitType Filter", description="Filter by benefit type."
     ),
+    id: MultipleQueryFilter[BenefitID] | None = Query(
+        None, title="Filter IDs", description="Filter by benefit IDs."
+    ),
+    exclude_id: MultipleQueryFilter[BenefitID] | None = Query(
+        None, title="Exclude IDs", description="Exclude benefits with these IDs."
+    ),
     session: AsyncSession = Depends(get_db_session),
     query: str | None = Query(
         None, title="Query", description="Filter by description."
@@ -61,6 +68,8 @@ async def list(
         auth_subject,
         type=type,
         organization_id=organization_id,
+        id_in=id,
+        id_not_in=exclude_id,
         metadata=metadata,
         query=query,
         pagination=pagination,
@@ -115,6 +124,9 @@ async def grants(
     customer_id: MultipleQueryFilter[CustomerID] | None = Query(
         None, title="CustomerID Filter", description="Filter by customer."
     ),
+    member_id: MultipleQueryFilter[UUID4] | None = Query(
+        None, title="MemberID Filter", description="Filter by member."
+    ),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListResource[BenefitGrant]:
     """
@@ -132,6 +144,7 @@ async def grants(
         benefit,
         is_granted=is_granted,
         customer_id=customer_id,
+        member_id=member_id,
         pagination=pagination,
     )
 

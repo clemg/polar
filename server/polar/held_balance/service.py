@@ -2,7 +2,7 @@ import structlog
 from sqlalchemy import or_, select
 from sqlalchemy.orm import joinedload
 
-from polar.exceptions import PolarError
+from polar.config import settings
 from polar.kit.services import ResourceServiceReader
 from polar.logging import Logger
 from polar.models import (
@@ -26,9 +26,6 @@ from polar.transaction.service.refund import (
 )
 
 log: Logger = structlog.get_logger()
-
-
-class HeldBalanceError(PolarError): ...
 
 
 class HeldBalanceService(ResourceServiceReader[HeldBalance]):
@@ -63,7 +60,10 @@ class HeldBalanceService(ResourceServiceReader[HeldBalance]):
                 joinedload(HeldBalance.issue_reward),
             )
         )
-        held_balances = await session.stream_scalars(statement)
+        held_balances = await session.stream_scalars(
+            statement,
+            execution_options={"yield_per": settings.DATABASE_STREAM_YIELD_PER},
+        )
 
         balance_transactions_list: list[tuple[Transaction, Transaction]] = []
         async for held_balance in held_balances:
@@ -79,9 +79,16 @@ class HeldBalanceService(ResourceServiceReader[HeldBalance]):
             )
             balance_transactions_list.append(balance_transactions)
 
-            await platform_fee_transaction_service.create_fees_reversal_balances(
-                session, balance_transactions=balance_transactions
+            platform_fee_transactions = (
+                await platform_fee_transaction_service.create_fees_reversal_balances(
+                    session, balance_transactions=balance_transactions
+                )
             )
+            if held_balance.order:
+                held_balance.order.platform_fee_amount = sum(
+                    incoming.amount for _, incoming in platform_fee_transactions
+                )
+                session.add(held_balance.order)
 
             await refund_transaction_service.create_reversal_balances_for_payment(
                 session, payment_transaction=held_balance.payment_transaction

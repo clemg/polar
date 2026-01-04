@@ -1,21 +1,17 @@
 import {
   useCreateCheckoutLink,
+  useDiscount,
   useDiscounts,
+  useSelectedProducts,
   useUpdateCheckoutLink,
 } from '@/hooks/queries'
 import { setValidationErrors } from '@/utils/api/errors'
 import { getDiscountDisplay } from '@/utils/discount'
-import { ClearOutlined } from '@mui/icons-material'
+import ClearOutlined from '@mui/icons-material/ClearOutlined'
 import { isValidationError, schemas } from '@polar-sh/client'
 import Button from '@polar-sh/ui/components/atoms/Button'
+import { Combobox } from '@polar-sh/ui/components/atoms/Combobox'
 import Input from '@polar-sh/ui/components/atoms/Input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@polar-sh/ui/components/atoms/Select'
 import Switch from '@polar-sh/ui/components/atoms/Switch'
 import {
   Form,
@@ -27,10 +23,11 @@ import {
   FormMessage,
 } from '@polar-sh/ui/components/ui/form'
 import { XIcon } from 'lucide-react'
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { SubmitHandler, useFieldArray, useForm } from 'react-hook-form'
 import ProductSelect from '../Products/ProductSelect'
 import { toast } from '../Toast/use-toast'
+import { TrialConfigurationForm } from '../TrialConfiguration/TrialConfigurationForm'
 
 type CheckoutLinkCreateForm = Omit<
   schemas['CheckoutLinkCreateProducts'],
@@ -52,14 +49,28 @@ export const CheckoutLinkForm = ({
   onClose,
   productIds,
 }: CheckoutLinkFormProps) => {
-  const { data: discounts } = useDiscounts(organization.id, {
-    limit: 100,
-    sorting: ['name'],
-  })
+  const [discountQuery, setDiscountQuery] = useState('')
+
+  const { data: discounts, isLoading: isLoadingDiscounts } = useDiscounts(
+    organization.id,
+    {
+      query: discountQuery || undefined,
+      limit: 10,
+      sorting: ['name'],
+    },
+  )
+
+  // Since discounts is paginated & dynamically loaded above,
+  // we need to fetch the selected discount separately to ensure we have its data
+  const { data: selectedDiscount } = useDiscount(
+    organization.id,
+    checkoutLink?.discount_id,
+  )
 
   const defaultValues = useMemo<CheckoutLinkCreateForm>(() => {
     if (checkoutLink) {
       return {
+        ...checkoutLink,
         label: checkoutLink.label ?? null,
         metadata: Object.entries(checkoutLink.metadata ?? {}).map(
           ([key, value]) => ({ key, value }),
@@ -81,13 +92,13 @@ export const CheckoutLinkForm = ({
       success_url: '',
       discount_id: '',
     }
-  }, [checkoutLink])
+  }, [checkoutLink, productIds])
 
   const form = useForm<CheckoutLinkCreateForm>({
     defaultValues,
   })
 
-  const { control, handleSubmit, setError, reset } = form
+  const { control, handleSubmit, setError, reset, watch } = form
   const { fields, append, remove } = useFieldArray({
     control,
     name: 'metadata',
@@ -95,6 +106,15 @@ export const CheckoutLinkForm = ({
       maxLength: 50,
     },
   })
+
+  // Watch for selected product IDs to determine if we should show trial configuration
+  const selectedProductIds = watch('products') || []
+  const { data: selectedProducts } = useSelectedProducts(selectedProductIds)
+
+  // Check if any selected products are recurring (subscription products)
+  const hasRecurringProducts = useMemo(() => {
+    return selectedProducts?.some((product) => product.is_recurring) ?? false
+  }, [selectedProducts])
 
   useEffect(() => {
     if (!checkoutLink) return
@@ -108,15 +128,25 @@ export const CheckoutLinkForm = ({
 
   const handleValidationError = useCallback(
     (data: CheckoutLinkCreateForm, errors: schemas['ValidationError'][]) => {
-      setValidationErrors(errors, setError)
-      errors.forEach((error) => {
-        if (error.loc[1] === 'metadata') {
-          const metadataKey = error.loc[2]
+      const discriminators = ['CheckoutLinkCreateProducts']
+      const filteredErrors = checkoutLink
+        ? errors
+        : errors.filter((error) =>
+            discriminators.includes(error.loc[1] as string),
+          )
+      setValidationErrors(filteredErrors, setError, 1, discriminators)
+      filteredErrors.forEach((error) => {
+        let loc = error.loc.slice(1)
+        if (discriminators.includes(loc[0] as string)) {
+          loc = loc.slice(1)
+        }
+        if (loc[0] === 'metadata') {
+          const metadataKey = loc[1]
           const metadataIndex = data.metadata.findIndex(
             ({ key }) => key === metadataKey,
           )
           if (metadataIndex > -1) {
-            const field = error.loc[3] === '[key]' ? 'key' : 'value'
+            const field = loc[2] === '[key]' ? 'key' : 'value'
             setError(`metadata.${metadataIndex}.${field}`, {
               message: error.msg,
             })
@@ -124,7 +154,7 @@ export const CheckoutLinkForm = ({
         }
       })
     },
-    [setError],
+    [checkoutLink, setError],
   )
 
   const onSubmit: SubmitHandler<CheckoutLinkCreateForm> = useCallback(
@@ -270,51 +300,54 @@ export const CheckoutLinkForm = ({
             )}
           />
 
-          {(discounts?.items.length ?? 0) > 0 && (
-            <FormField
-              control={control}
-              name="discount_id"
-              render={({ field }) => {
-                return (
-                  <FormItem>
-                    <FormLabel>Preset discount</FormLabel>
-                    <div className="flex flex-row items-center gap-2">
-                      <Select
-                        onValueChange={field.onChange}
-                        value={field.value || ''}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select a discount" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {discounts?.items.map((discount) => (
-                            <SelectItem
-                              key={discount.id}
-                              value={discount.id}
-                              textValue={discount.name}
-                            >
-                              {discount.name} ({getDiscountDisplay(discount)})
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      {field.value && (
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          type="button"
-                          onClick={() => field.onChange(null)}
-                        >
-                          <XIcon className="h-4 w-4" />
-                        </Button>
+          <FormField
+            control={control}
+            name="discount_id"
+            render={({ field }) => {
+              const selectedItem =
+                selectedDiscount?.id === field.value
+                  ? selectedDiscount
+                  : discounts?.items.find((d) => d.id === field.value)
+
+              return (
+                <FormItem>
+                  <FormLabel>Preset discount</FormLabel>
+                  <div className="flex flex-row items-center gap-2">
+                    <Combobox
+                      items={discounts?.items || []}
+                      value={field.value || null}
+                      selectedItem={selectedItem || null}
+                      onChange={(value) => field.onChange(value || '')}
+                      onQueryChange={setDiscountQuery}
+                      getItemValue={(discount) => discount.id}
+                      getItemLabel={(discount) => discount.name}
+                      renderItem={(discount) => (
+                        <>
+                          {discount.name} ({getDiscountDisplay(discount)})
+                        </>
                       )}
-                    </div>
-                    <FormMessage />
-                  </FormItem>
-                )
-              }}
-            />
-          )}
+                      isLoading={isLoadingDiscounts}
+                      placeholder="Select a discount"
+                      searchPlaceholder="Search discounts…"
+                      emptyLabel="No discounts found"
+                      className="flex-1"
+                    />
+                    {field.value && (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        type="button"
+                        onClick={() => field.onChange(null)}
+                      >
+                        <XIcon className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                  <FormMessage />
+                </FormItem>
+              )
+            }}
+          />
 
           <FormField
             control={control}
@@ -322,7 +355,7 @@ export const CheckoutLinkForm = ({
             render={({ field }) => {
               return (
                 <FormItem>
-                  <div className="flex flex-row items-center justify-between space-x-2 space-y-0">
+                  <div className="flex flex-row items-center justify-between space-y-0 space-x-2">
                     <FormLabel>Allow discount codes</FormLabel>
                     <FormControl>
                       <Switch
@@ -347,7 +380,7 @@ export const CheckoutLinkForm = ({
             render={({ field }) => {
               return (
                 <FormItem>
-                  <div className="flex flex-row items-center justify-between space-x-2 space-y-0">
+                  <div className="flex flex-row items-center justify-between space-y-0 space-x-2">
                     <FormLabel>Require billing address</FormLabel>
                     <FormControl>
                       <Switch
@@ -366,6 +399,10 @@ export const CheckoutLinkForm = ({
               )
             }}
           />
+
+          {hasRecurringProducts && (
+            <TrialConfigurationForm bottomText="This will override the trial configuration set on products." />
+          )}
 
           <FormItem>
             <div className="flex flex-row items-center justify-between gap-2 py-2">

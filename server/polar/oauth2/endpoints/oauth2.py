@@ -4,7 +4,7 @@ from typing import Literal, cast
 from fastapi import Depends, Form, HTTPException, Request, Response
 from fastapi.openapi.constants import REF_TEMPLATE
 
-from polar.auth.dependencies import WebUser, WebUserOrAnonymous
+from polar.auth.dependencies import WebUserOrAnonymous, WebUserRead, WebUserWrite
 from polar.auth.models import is_user
 from polar.kit.pagination import ListResource, PaginationParamsQuery
 from polar.models import OAuth2Token, Organization
@@ -49,7 +49,7 @@ router = APIRouter(prefix="/oauth2", tags=["oauth2"])
     response_model=ListResource[OAuth2Client],
 )
 async def list(
-    auth_subject: WebUser,
+    auth_subject: WebUserRead,
     pagination: PaginationParamsQuery,
     session: AsyncSession = Depends(get_db_session),
 ) -> ListResource[OAuth2Client]:
@@ -65,18 +65,20 @@ async def list(
 @router.post(
     "/register",
     summary="Create Client",
-    tags=["clients", APITag.private],
+    tags=["clients", APITag.public],
     name="oauth2:create_client",
 )
 async def create(
     client_configuration: OAuth2ClientConfiguration,
     request: Request,
-    auth_subject: WebUser,
+    auth_subject: WebUserOrAnonymous,
     authorization_server: AuthorizationServer = Depends(get_authorization_server),
 ) -> Response:
     """Create an OAuth2 client."""
-    request.state.user = auth_subject.subject
-    request.state.parsed_data = client_configuration.model_dump(mode="json")
+    request.state.user = auth_subject.subject if is_user(auth_subject) else None
+    request.state.parsed_data = client_configuration.model_dump(
+        mode="json", exclude_none=True
+    )
     return authorization_server.create_endpoint_response(
         ClientRegistrationEndpoint.ENDPOINT_NAME, request
     )
@@ -84,7 +86,7 @@ async def create(
 
 @router.get(
     "/register/{client_id}",
-    tags=["clients", APITag.private],
+    tags=["clients", APITag.public],
     summary="Get Client",
     name="oauth2:get_client",
 )
@@ -103,7 +105,7 @@ async def get(
 
 @router.put(
     "/register/{client_id}",
-    tags=["clients", APITag.private],
+    tags=["clients", APITag.public],
     summary="Update Client",
     name="oauth2:update_client",
 )
@@ -116,7 +118,9 @@ async def update(
 ) -> Response:
     """Update an OAuth2 client."""
     request.state.user = auth_subject.subject if is_user(auth_subject) else None
-    request.state.parsed_data = client_configuration.model_dump(mode="json")
+    request.state.parsed_data = client_configuration.model_dump(
+        mode="json", exclude_none=True
+    )
     return authorization_server.create_endpoint_response(
         ClientConfigurationEndpoint.ENDPOINT_NAME, request
     )
@@ -124,7 +128,7 @@ async def update(
 
 @router.delete(
     "/register/{client_id}",
-    tags=["clients", APITag.private],
+    tags=["clients", APITag.public],
     summary="Delete Client",
     name="oauth2:delete_client",
 )
@@ -141,7 +145,7 @@ async def delete(
     )
 
 
-@router.get("/authorize", tags=[APITag.documented])
+@router.get("/authorize", tags=[APITag.public])
 async def authorize(
     request: Request,
     auth_subject: WebUserOrAnonymous,
@@ -169,10 +173,13 @@ async def authorize(
             auth_subject.subject.id
         )
 
+    payload = grant.request.payload
+    assert payload is not None
+
     return authorize_response_adapter.validate_python(
         {
             "client": grant.client,
-            "scopes": grant.request.scope,
+            "scopes": payload.scope,
             "sub_type": grant.sub_type,
             "sub": grant.sub,
             "organizations": organizations,
@@ -183,7 +190,7 @@ async def authorize(
 @router.post("/consent", tags=[APITag.private])
 async def consent(
     request: Request,
-    auth_subject: WebUser,
+    auth_subject: WebUserWrite,
     action: Literal["allow", "deny"] = Form(...),
     authorization_server: AuthorizationServer = Depends(get_authorization_server),
 ) -> Response:
@@ -199,7 +206,7 @@ async def consent(
     summary="Request Token",
     name="oauth2:request_token",
     operation_id="oauth2:request_token",
-    tags=[APITag.featured, APITag.documented],
+    tags=[APITag.public],
     openapi_extra={
         "requestBody": {
             "required": True,
@@ -213,6 +220,7 @@ async def consent(
                                 )
                             },
                             {"$ref": REF_TEMPLATE.format(model="RefreshTokenRequest")},
+                            {"$ref": REF_TEMPLATE.format(model="WebTokenRequest")},
                         ]
                     }
                 }
@@ -235,7 +243,7 @@ async def token(
     summary="Revoke Token",
     name="oauth2:revoke_token",
     operation_id="oauth2:revoke_token",
-    tags=[APITag.featured, APITag.documented],
+    tags=[APITag.public],
     openapi_extra={
         "requestBody": {
             "required": True,
@@ -264,7 +272,7 @@ async def revoke(
     summary="Introspect Token",
     name="oauth2:introspect_token",
     operation_id="oauth2:introspect_token",
-    tags=[APITag.featured, APITag.documented],
+    tags=[APITag.public],
     openapi_extra={
         "requestBody": {
             "required": True,
@@ -297,7 +305,7 @@ async def introspect(
     operation_id="oauth2:userinfo",
     response_model=UserInfoSchema,
     response_model_exclude_unset=True,
-    tags=[APITag.featured, APITag.documented],
+    tags=[APITag.public],
     openapi_extra={"x-speakeasy-name-override": "userinfo"},
 )
 async def userinfo_get(token: OAuth2Token = Depends(get_token)) -> UserInfo:

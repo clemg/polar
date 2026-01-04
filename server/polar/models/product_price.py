@@ -1,10 +1,8 @@
-import math
 from decimal import Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 from uuid import UUID
 
-import stripe as stripe_lib
 from babel.numbers import format_currency, format_decimal
 from sqlalchemy import (
     Boolean,
@@ -19,6 +17,7 @@ from sqlalchemy import (
     func,
     type_coerce,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import (
     Mapped,
@@ -30,6 +29,8 @@ from sqlalchemy.orm import (
 
 from polar.enums import SubscriptionRecurringInterval
 from polar.kit.db.models import RecordModel
+from polar.kit.extensions.sqlalchemy.types import StringEnum
+from polar.kit.math import polar_round
 
 if TYPE_CHECKING:
     from polar.models import Meter, Product
@@ -48,23 +49,32 @@ class ProductPriceAmountType(StrEnum):
     custom = "custom"
     free = "free"
     metered_unit = "metered_unit"
+    seat_based = "seat_based"
+
+
+class ProductPriceSource(StrEnum):
+    catalog = "catalog"
+    ad_hoc = "ad_hoc"
+
+
+class SeatTier(TypedDict):
+    """A single pricing tier for seat-based pricing."""
+
+    min_seats: int
+    max_seats: int | None
+    price_per_seat: int
+
+
+class SeatTiersData(TypedDict):
+    """The structure of the seat_tiers JSONB column."""
+
+    tiers: list[SeatTier]
 
 
 class HasPriceCurrency:
     price_currency: Mapped[str] = mapped_column(
         String(3), nullable=True, use_existing_column=True
     )
-
-
-class HasStripePriceId:
-    stripe_price_id: Mapped[str] = mapped_column(
-        String, nullable=True, use_existing_column=True
-    )
-
-    def get_stripe_price_params(
-        self, recurring_interval: SubscriptionRecurringInterval | None
-    ) -> stripe_lib.Price.CreateParams:
-        raise NotImplementedError()
 
 
 LEGACY_IDENTITY_PREFIX = "legacy_"
@@ -76,9 +86,18 @@ class ProductPrice(RecordModel):
     # Legacy: recurring is now set on product
     type: Mapped[Any] = mapped_column(String, nullable=True, index=True, default=None)
     recurring_interval: Mapped[Any] = mapped_column(
-        String, nullable=True, index=True, default=None
+        StringEnum(SubscriptionRecurringInterval),
+        nullable=True,
+        index=True,
+        default=None,
     )
 
+    source = mapped_column(
+        StringEnum(ProductPriceSource),
+        nullable=False,
+        index=True,
+        default=ProductPriceSource.catalog,
+    )
     amount_type: Mapped[ProductPriceAmountType] = mapped_column(
         String, nullable=False, index=True
     )
@@ -88,9 +107,28 @@ class ProductPrice(RecordModel):
         Uuid, ForeignKey("products.id", ondelete="cascade"), nullable=False, index=True
     )
 
+    checkout_product_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("checkout_products.id", ondelete="set null"),
+        nullable=True,
+        index=True,
+        default=None,
+    )
+    """
+    Foreign key to the CheckoutProduct this price is associated with, if any.
+
+    Used for ad-hoc prices created on-demand for checkout sessions.
+    """
+
     @declared_attr
     def product(cls) -> Mapped["Product"]:
         return relationship("Product", lazy="raise_on_sql", back_populates="all_prices")
+
+    @declared_attr
+    def checkout_product(cls) -> Mapped["Product | None"]:
+        return relationship(
+            "CheckoutProduct", lazy="raise_on_sql", back_populates="ad_hoc_prices"
+        )
 
     @hybrid_property
     def is_recurring(self) -> bool:
@@ -107,6 +145,7 @@ class ProductPrice(RecordModel):
             ProductPriceAmountType.fixed,
             ProductPriceAmountType.free,
             ProductPriceAmountType.custom,
+            ProductPriceAmountType.seat_based,
         }
 
     @is_static.inplace.expression
@@ -117,6 +156,7 @@ class ProductPrice(RecordModel):
                 ProductPriceAmountType.fixed,
                 ProductPriceAmountType.free,
                 ProductPriceAmountType.custom,
+                ProductPriceAmountType.seat_based,
             )
         )
 
@@ -179,25 +219,11 @@ class NewProductPrice:
     }
 
 
-class _ProductPriceFixed(HasStripePriceId, HasPriceCurrency, ProductPrice):
+class _ProductPriceFixed(HasPriceCurrency, ProductPrice):
     price_amount: Mapped[int] = mapped_column(Integer, nullable=True)
     amount_type: Mapped[Literal[ProductPriceAmountType.fixed]] = mapped_column(
         use_existing_column=True, default=ProductPriceAmountType.fixed
     )
-
-    def get_stripe_price_params(
-        self, recurring_interval: SubscriptionRecurringInterval | None
-    ) -> stripe_lib.Price.CreateParams:
-        params: stripe_lib.Price.CreateParams = {
-            "unit_amount": self.price_amount,
-            "currency": self.price_currency,
-        }
-        if recurring_interval is not None:
-            params = {
-                **params,
-                "recurring": {"interval": recurring_interval.as_literal()},
-            }
-        return params
 
     __mapper_args__ = {
         "polymorphic_abstract": True,
@@ -219,7 +245,7 @@ class LegacyRecurringProductPriceFixed(LegacyRecurringProductPrice, _ProductPric
     }
 
 
-class _ProductPriceCustom(HasStripePriceId, HasPriceCurrency, ProductPrice):
+class _ProductPriceCustom(HasPriceCurrency, ProductPrice):
     amount_type: Mapped[Literal[ProductPriceAmountType.custom]] = mapped_column(
         use_existing_column=True, default=ProductPriceAmountType.custom
     )
@@ -232,27 +258,6 @@ class _ProductPriceCustom(HasStripePriceId, HasPriceCurrency, ProductPrice):
     preset_amount: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None
     )
-
-    def get_stripe_price_params(
-        self, recurring_interval: SubscriptionRecurringInterval | None
-    ) -> stripe_lib.Price.CreateParams:
-        custom_unit_amount_params: stripe_lib.Price.CreateParamsCustomUnitAmount = {
-            "enabled": True,
-        }
-        if self.minimum_amount is not None:
-            custom_unit_amount_params["minimum"] = self.minimum_amount
-        if self.maximum_amount is not None:
-            custom_unit_amount_params["maximum"] = self.maximum_amount
-        if self.preset_amount is not None:
-            custom_unit_amount_params["preset"] = self.preset_amount
-
-        # `recurring_interval` is unused because we actually create ad-hoc prices,
-        # since Stripe doesn't support PWYW pricing for subscriptions.
-
-        return {
-            "currency": self.price_currency,
-            "custom_unit_amount": custom_unit_amount_params,
-        }
 
     __mapper_args__ = {
         "polymorphic_abstract": True,
@@ -276,25 +281,10 @@ class LegacyRecurringProductPriceCustom(
     }
 
 
-class _ProductPriceFree(HasStripePriceId, ProductPrice):
+class _ProductPriceFree(ProductPrice):
     amount_type: Mapped[Literal[ProductPriceAmountType.free]] = mapped_column(
         use_existing_column=True, default=ProductPriceAmountType.free
     )
-
-    def get_stripe_price_params(
-        self, recurring_interval: SubscriptionRecurringInterval | None
-    ) -> stripe_lib.Price.CreateParams:
-        params: stripe_lib.Price.CreateParams = {
-            "unit_amount": 0,
-            "currency": "usd",
-        }
-        if recurring_interval is not None:
-            params = {
-                **params,
-                "recurring": {"interval": recurring_interval.as_literal()},
-            }
-
-        return params
 
     __mapper_args__ = {
         "polymorphic_abstract": True,
@@ -346,11 +336,7 @@ class ProductPriceMeteredUnit(ProductPrice, HasPriceCurrency, NewProductPrice):
 
         billable_units = Decimal(max(0, units))
         raw_amount = self.unit_amount * billable_units
-        amount = (
-            math.ceil(raw_amount)
-            if raw_amount - int(raw_amount) >= 0.5
-            else math.floor(raw_amount)
-        )
+        amount = polar_round(raw_amount)
 
         if self.cap_amount is not None and amount > self.cap_amount:
             amount = self.cap_amount
@@ -360,6 +346,36 @@ class ProductPriceMeteredUnit(ProductPrice, HasPriceCurrency, NewProductPrice):
 
     __mapper_args__ = {
         "polymorphic_identity": ProductPriceAmountType.metered_unit,
+        "polymorphic_load": "inline",
+    }
+
+
+class ProductPriceSeatUnit(NewProductPrice, HasPriceCurrency, ProductPrice):
+    amount_type: Mapped[Literal[ProductPriceAmountType.seat_based]] = mapped_column(
+        use_existing_column=True, default=ProductPriceAmountType.seat_based
+    )
+    seat_tiers: Mapped[SeatTiersData] = mapped_column(
+        postgresql.JSONB,
+        nullable=True,
+    )
+
+    def get_tier_for_seats(self, seats: int) -> SeatTier:
+        for tier in self.seat_tiers.get("tiers", []):
+            min_seats = tier["min_seats"]
+            max_seats = tier.get("max_seats")
+            if seats >= min_seats and (max_seats is None or seats <= max_seats):
+                return tier
+        raise ValueError(f"No tier found for {seats} seats")
+
+    def get_price_per_seat(self, seats: int) -> int:
+        tier = self.get_tier_for_seats(seats)
+        return tier["price_per_seat"]
+
+    def calculate_amount(self, seats: int) -> int:
+        return self.get_price_per_seat(seats) * seats
+
+    __mapper_args__ = {
+        "polymorphic_identity": ProductPriceAmountType.seat_based,
         "polymorphic_load": "inline",
     }
 

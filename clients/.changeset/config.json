@@ -9,8 +9,8 @@
   "updateInternalDependencies": "patch",
   "ignore": [
     "web",
+    "@polar-sh/app",
     "@examples/checkout-embed",
-    "@examples/checkout-components",
     "@polar-sh/client"
   ]
 }

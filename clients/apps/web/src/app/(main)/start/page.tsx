@@ -16,18 +16,14 @@ import { redirect } from 'next/navigation'
  */
 
 export default async function Page() {
-  const api = getServerSideAPI()
-  const userOrganizations = await getUserOrganizations(api)
+  const api = await getServerSideAPI()
+  const userOrganizations = await getUserOrganizations(api, true)
 
   if (userOrganizations.length === 0) {
     redirect('/dashboard/create')
   }
 
-  const org = userOrganizations.find(
-    (org) => org.slug === getLastVisitedOrg(cookies()),
-  )
-
-  const targetOrg = org?.slug ?? userOrganizations[0].slug
-
-  redirect(`/dashboard/${targetOrg}`)
+  const lastVisitedOrg = getLastVisitedOrg(await cookies(), userOrganizations)
+  const organization = lastVisitedOrg ? lastVisitedOrg : userOrganizations[0]
+  redirect(`/dashboard/${organization.slug}`)
 }

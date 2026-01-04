@@ -4,14 +4,43 @@ from uuid import UUID
 from sqlalchemy import Select, func
 from sqlalchemy.orm import joinedload
 
+from polar.exceptions import PolarError
 from polar.kit.utils import utc_now
 from polar.models import UserOrganization
-from polar.postgres import AsyncSession, sql
+from polar.postgres import AsyncReadSession, AsyncSession, sql
+
+
+class UserOrganizationError(PolarError): ...
+
+
+class OrganizationNotFound(UserOrganizationError):
+    def __init__(self, organization_id: UUID) -> None:
+        self.organization_id = organization_id
+        message = f"Organization with id {organization_id} not found."
+        super().__init__(message, 404)
+
+
+class UserNotMemberOfOrganization(UserOrganizationError):
+    def __init__(self, user_id: UUID, organization_id: UUID) -> None:
+        self.user_id = user_id
+        self.organization_id = organization_id
+        message = (
+            f"User with id {user_id} is not a member of organization {organization_id}."
+        )
+        super().__init__(message, 404)
+
+
+class CannotRemoveOrganizationAdmin(UserOrganizationError):
+    def __init__(self, user_id: UUID, organization_id: UUID) -> None:
+        self.user_id = user_id
+        self.organization_id = organization_id
+        message = f"Cannot remove user {user_id} - they are the admin of organization {organization_id}."
+        super().__init__(message, 403)
 
 
 class UserOrganizationService:
     async def list_by_org(
-        self, session: AsyncSession, org_id: UUID
+        self, session: AsyncReadSession, org_id: UUID
     ) -> Sequence[UserOrganization]:
         stmt = (
             sql.select(UserOrganization)
@@ -27,6 +56,16 @@ class UserOrganizationService:
 
         res = await session.execute(stmt)
         return res.scalars().unique().all()
+
+    async def get_member_count(self, session: AsyncReadSession, org_id: UUID) -> int:
+        """Get the count of active members in an organization."""
+        stmt = sql.select(func.count(UserOrganization.user_id)).where(
+            UserOrganization.organization_id == org_id,
+            UserOrganization.deleted_at.is_(None),
+        )
+        res = await session.execute(stmt)
+        count = res.scalar()
+        return count if count else 0
 
     async def list_by_user_id(
         self, session: AsyncSession, user_id: UUID
@@ -85,6 +124,42 @@ class UserOrganizationService:
             .values(deleted_at=utc_now())
         )
         await session.execute(stmt)
+
+    async def remove_member_safe(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+        organization_id: UUID,
+    ) -> None:
+        """
+        Safely remove a member from an organization.
+
+        Raises:
+            OrganizationNotFound: If the organization doesn't exist
+            UserNotMemberOfOrganization: If the user is not a member of the organization
+            CannotRemoveOrganizationAdmin: If the user is the organization admin
+        """
+        from polar.organization.repository import OrganizationRepository
+
+        org_repo = OrganizationRepository.from_session(session)
+        organization = await org_repo.get_by_id(organization_id)
+
+        if not organization:
+            raise OrganizationNotFound(organization_id)
+
+        # Check if user is actually a member
+        user_org = await self.get_by_user_and_org(session, user_id, organization_id)
+        if not user_org:
+            raise UserNotMemberOfOrganization(user_id, organization_id)
+
+        # Check if the user is the organization admin
+        if organization.account_id:
+            admin_user = await org_repo.get_admin_user(session, organization)
+            if admin_user and admin_user.id == user_id:
+                raise CannotRemoveOrganizationAdmin(user_id, organization_id)
+
+        # Remove the member
+        await self.remove_member(session, user_id, organization_id)
 
     def _get_list_by_user_id_query(
         self, user_id: UUID, ordered: bool = True

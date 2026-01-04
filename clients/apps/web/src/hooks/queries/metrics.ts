@@ -11,6 +11,7 @@ interface GetMetricsRequest {
   organization_id?: string
   product_id?: string[]
   customer_id?: string[]
+  metrics?: string[]
 }
 
 export type ParsedMetricPeriod = schemas['MetricPeriod'] & {
@@ -57,7 +58,7 @@ export const useMetrics = (
         periods: metrics.periods.map((period) => ({
           ...period,
           timestamp: new Date(period.timestamp),
-        })),
+        })) as ParsedMetricPeriod[],
       }
     },
     retry: defaultRetry,

@@ -1,22 +1,19 @@
 import { PolarHog, usePostHog } from '@/hooks/posthog'
-import {
-  AllInclusiveOutlined,
-  AttachMoneyOutlined,
-  CodeOutlined,
-  DiamondOutlined,
-  DiscountOutlined,
-  DonutLargeOutlined,
-  HiveOutlined,
-  LinkOutlined,
-  PeopleAltOutlined,
-  ShoppingBagOutlined,
-  SpaceDashboardOutlined,
-  Storefront,
-  StreamOutlined,
-  TrendingUp,
-  TuneOutlined,
-} from '@mui/icons-material'
+import AllInclusiveOutlined from '@mui/icons-material/AllInclusiveOutlined'
+import AttachMoneyOutlined from '@mui/icons-material/AttachMoneyOutlined'
+import CodeOutlined from '@mui/icons-material/CodeOutlined'
+import DiamondOutlined from '@mui/icons-material/DiamondOutlined'
+import DiscountOutlined from '@mui/icons-material/DiscountOutlined'
+import DonutLargeOutlined from '@mui/icons-material/DonutLargeOutlined'
+import HiveOutlined from '@mui/icons-material/HiveOutlined'
+import LinkOutlined from '@mui/icons-material/LinkOutlined'
+import PeopleAltOutlined from '@mui/icons-material/PeopleAltOutlined'
+import ShoppingBagOutlined from '@mui/icons-material/ShoppingBagOutlined'
+import SpaceDashboardOutlined from '@mui/icons-material/SpaceDashboardOutlined'
+import TrendingUp from '@mui/icons-material/TrendingUp'
+import TuneOutlined from '@mui/icons-material/TuneOutlined'
 import { schemas } from '@polar-sh/client'
+import { Status } from '@polar-sh/ui/components/atoms/Status'
 import { ShoppingCart } from 'lucide-react'
 import { usePathname } from 'next/navigation'
 import { useMemo } from 'react'
@@ -25,12 +22,14 @@ export type SubRoute = {
   readonly title: string
   readonly link: string
   readonly icon?: React.ReactNode
+  readonly if?: boolean | (() => boolean)
+  readonly extra?: React.ReactNode
 }
 
 export type Route = {
   readonly id: string
   readonly title: string
-  readonly icon?: React.ReactElement
+  readonly icon?: React.ReactElement<any>
   readonly link: string
   readonly if: boolean | undefined
   readonly subs?: SubRoute[]
@@ -51,9 +50,19 @@ const applySubRouteIsActive = (
   parentRoute?: Route,
 ): ((r: SubRoute) => SubRouteWithActive) => {
   return (r: SubRoute): SubRouteWithActive => {
-    const isActive =
-      r.link === path ||
-      (parentRoute?.link !== r.link && path.startsWith(r.link))
+    let isActive = r.link === path
+
+    if (!isActive && path.startsWith(r.link)) {
+      if (parentRoute?.link !== r.link) {
+        isActive = true
+      } else if (parentRoute.subs) {
+        const hasMoreSpecificMatch = parentRoute.subs.some(
+          (sub) =>
+            sub !== r && sub.link !== r.link && path.startsWith(sub.link),
+        )
+        isActive = !hasMoreSpecificMatch
+      }
+    }
 
     return {
       ...r,
@@ -95,9 +104,25 @@ const useResolveRoutes = (
   const posthog = usePostHog()
 
   return useMemo(() => {
-    return routesResolver(org, posthog)
-      .filter((o) => allowAll || o.if)
-      .map(applyIsActive(path))
+    return (
+      routesResolver(org, posthog)
+        .filter((o) => allowAll || o.if)
+        // Filter out child routes if they have an if-function and it evaluates to false
+        .map((route) => {
+          if (route.subs && Array.isArray(route.subs)) {
+            return {
+              ...route,
+              subs: route.subs.filter(
+                (child) =>
+                  typeof child.if === 'undefined' ||
+                  (typeof child.if === 'function' ? child.if() : child.if),
+              ),
+            }
+          }
+          return route
+        })
+        .map(applyIsActive(path))
+    )
   }, [org, path, allowAll, routesResolver, posthog])
 }
 
@@ -166,39 +191,17 @@ const generalRoutesList = (org?: schemas['Organization']): Route[] => [
         link: `/dashboard/${org?.slug}/products/discounts`,
         icon: <DiscountOutlined fontSize="inherit" />,
       },
-    ],
-  },
-  {
-    id: 'usage-billing',
-    title: 'Usage Billing',
-    icon: <DonutLargeOutlined fontSize="inherit" />,
-    link: `/dashboard/${org?.slug}/usage-billing`,
-    if: true,
-    checkIsActive: (currentRoute: string): boolean => {
-      return currentRoute.startsWith(`/dashboard/${org?.slug}/usage-billing`)
-    },
-    subs: [
+      {
+        title: 'Benefits',
+        link: `/dashboard/${org?.slug}/products/benefits`,
+        icon: <DiamondOutlined fontSize="inherit" />,
+      },
       {
         title: 'Meters',
-        link: `/dashboard/${org?.slug}/usage-billing/meters`,
+        link: `/dashboard/${org?.slug}/products/meters`,
         icon: <DonutLargeOutlined fontSize="inherit" />,
       },
-      {
-        title: 'Events',
-        link: `/dashboard/${org?.slug}/usage-billing/events`,
-        icon: <StreamOutlined fontSize="inherit" />,
-      },
     ],
-  },
-  {
-    id: 'benefits',
-    title: 'Benefits',
-    icon: <DiamondOutlined fontSize="inherit" />,
-    link: `/dashboard/${org?.slug}/benefits`,
-    checkIsActive: (currentRoute: string): boolean => {
-      return currentRoute.startsWith(`/dashboard/${org?.slug}/benefits`)
-    },
-    if: true,
   },
   {
     id: 'customers',
@@ -209,6 +212,35 @@ const generalRoutesList = (org?: schemas['Organization']): Route[] => [
       return currentRoute.startsWith(`/dashboard/${org?.slug}/customers`)
     },
     if: true,
+  },
+  {
+    id: 'analytics',
+    title: 'Analytics',
+    icon: <TrendingUp fontSize="inherit" />,
+    link: `/dashboard/${org?.slug}/analytics`,
+    if: true,
+    subs: [
+      {
+        title: 'Metrics',
+        link: `/dashboard/${org?.slug}/analytics/metrics`,
+      },
+      {
+        title: 'Events',
+        link: `/dashboard/${org?.slug}/analytics/events`,
+      },
+      {
+        title: 'Costs',
+        link: `/dashboard/${org?.slug}/analytics/costs`,
+        if: () => org?.feature_settings?.revops_enabled ?? false,
+        extra: (
+          <Status
+            status="Beta"
+            size="small"
+            className="bg-blue-100 text-blue-600 dark:bg-blue-950 dark:text-blue-400"
+          />
+        ),
+      },
+    ],
   },
   {
     id: 'org-sales',
@@ -236,20 +268,6 @@ const generalRoutesList = (org?: schemas['Organization']): Route[] => [
         icon: <ShoppingCart />,
       },
     ],
-  },
-  {
-    id: 'storefront',
-    title: 'Storefront',
-    icon: <Storefront fontSize="inherit" />,
-    link: `/dashboard/${org?.slug}/storefront`,
-    if: false,
-  },
-  {
-    id: 'analytics',
-    title: 'Analytics',
-    icon: <TrendingUp fontSize="inherit" />,
-    link: `/dashboard/${org?.slug}/analytics`,
-    if: true,
   },
 ]
 
@@ -311,6 +329,10 @@ const organizationRoutesList = (org?: schemas['Organization']): Route[] => [
       {
         title: 'General',
         link: `/dashboard/${org?.slug}/settings`,
+      },
+      {
+        title: 'Members',
+        link: `/dashboard/${org?.slug}/settings/members`,
       },
       {
         title: 'Webhooks',

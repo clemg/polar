@@ -1,11 +1,8 @@
 import { useNotifications, useNotificationsMarkRead } from '@/hooks/queries'
 import { useOutsideClick } from '@/utils/useOutsideClick'
-import {
-  BoltOutlined,
-  FaceOutlined,
-  InfoOutlined,
-  ShoppingBagOutlined,
-} from '@mui/icons-material'
+import BoltOutlined from '@mui/icons-material/BoltOutlined'
+import InfoOutlined from '@mui/icons-material/InfoOutlined'
+import ShoppingBagOutlined from '@mui/icons-material/ShoppingBagOutlined'
 import { schemas } from '@polar-sh/client'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import PolarTimeAgo from '@polar-sh/ui/components/atoms/PolarTimeAgo'
@@ -91,12 +88,12 @@ export const NotificationsPopover = () => {
       >
         <PopoverTrigger>
           <BoltOutlined
-            className="!h-5 !w-5"
+            className="[&svg]:size-5!"
             fontSize="medium"
             aria-hidden="true"
           />
           {showBadge && (
-            <div className="dark:border-polar-700 absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-blue-500" />
+            <div className="dark:border-polar-700 bg-blue absolute top-1 right-1 h-1.5 w-1.5 rounded-full" />
           )}
         </PopoverTrigger>
       </Button>
@@ -146,7 +143,7 @@ const Item = ({
 }: {
   iconClasses: string
   n: NotificationSchema
-  children: { icon: React.ReactElement; text: React.ReactElement }
+  children: { icon: React.ReactElement<any>; text: React.ReactElement<any> }
 }) => {
   return (
     <div className="flex space-x-2.5 text-sm transition-colors duration-100">
@@ -158,53 +155,6 @@ const Item = ({
         </div>
       </div>
     </div>
-  )
-}
-
-const MaintainerAccountUnderReview = ({
-  n,
-}: {
-  n: schemas['MaintainerAccountUnderReviewNotification']
-}) => {
-  return (
-    <Item n={n} iconClasses="bg-yellow-200 text-yellow-500">
-      {{
-        text: (
-          <>
-            Your{' '}
-            <InternalLink href="/finance/account">
-              <>payout account</>
-            </InternalLink>{' '}
-            is under review. Transfers are paused until we complete the review
-            of your account.
-          </>
-        ),
-        icon: <FaceOutlined fontSize="small" />,
-      }}
-    </Item>
-  )
-}
-
-const MaintainerAccountReviewed = ({
-  n,
-}: {
-  n: schemas['MaintainerAccountReviewedNotification']
-}) => {
-  return (
-    <Item n={n} iconClasses="bg-green-200 text-green-500">
-      {{
-        text: (
-          <>
-            Your{' '}
-            <InternalLink href="/finance/account">
-              <>payout account</>
-            </InternalLink>{' '}
-            has been reviewed successfully. Transfers are resumed.
-          </>
-        ),
-        icon: <FaceOutlined fontSize="small" />,
-      }}
-    </Item>
   )
 }
 
@@ -296,11 +246,6 @@ export const Notification = ({
   setIsInNestedModal: (_: boolean) => void
 }) => {
   switch (n.type) {
-    case 'MaintainerAccountUnderReviewNotification':
-      return <MaintainerAccountUnderReview n={n} />
-    case 'MaintainerAccountReviewedNotification':
-      return <MaintainerAccountReviewed n={n} />
-
     case 'MaintainerNewPaidSubscriptionNotification':
       return <MaintainerNewPaidSubscription n={n} />
 
@@ -314,7 +259,7 @@ export const Notification = ({
 
 const InternalLink = (props: {
   href: string
-  children: React.ReactElement
+  children: React.ReactElement<any>
 }) => {
   return (
     <Link className="font-bold hover:underline" href={props.href}>

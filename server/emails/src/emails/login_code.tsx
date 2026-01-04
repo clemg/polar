@@ -1,32 +1,28 @@
 import { Preview, Section, Text } from '@react-email/components'
 import Footer from '../components/Footer'
-import Header from '../components/Header'
+import IntroWithHi from '../components/IntroWithHi'
+import PolarHeader from '../components/PolarHeader'
 import Wrapper from '../components/Wrapper'
+import type { schemas } from '../types'
 
 export function LoginCode({
+  email,
   code,
   code_lifetime_minutes,
-}: {
-  code: string
-  code_lifetime_minutes: number
-}) {
+}: schemas['LoginCodeProps']) {
   return (
     <Wrapper>
       <Preview>
         Your code to sign in is {code}. It is valid for the next{' '}
-        {code_lifetime_minutes} minutes.
+        {code_lifetime_minutes.toFixed()} minutes.
       </Preview>
-      <Header />
-      <Section>
-        <Text>Hi,</Text>
-        <Text>
-          Here is your code to sign in to Polar.{' '}
-          <span className="font-bold">
-            This code is only valid for the next {code_lifetime_minutes}{' '}
-            minutes.
-          </span>
-        </Text>
-      </Section>
+      <PolarHeader />
+      <IntroWithHi>
+        Here is your code to sign in to Polar.{' '}
+        <span className="font-bold">
+          This code is only valid for the next {code_lifetime_minutes} minutes.
+        </span>
+      </IntroWithHi>
       <Section className="text-center">
         <Text className="text-brand text-5xl font-bold tracking-wider">
           {code}
@@ -35,12 +31,13 @@ export function LoginCode({
       <Text className="text-gray-500">
         If you didn't request this email, you can safely ignore it.
       </Text>
-      <Footer />
+      <Footer email={email} />
     </Wrapper>
   )
 }
 
 LoginCode.PreviewProps = {
+  email: 'john@example.com',
   code: 'ABC123',
   code_lifetime_minutes: 30,
 }

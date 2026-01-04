@@ -9,12 +9,14 @@ import {
 } from '@/hooks/queries'
 import { Client, schemas } from '@polar-sh/client'
 import Button from '@polar-sh/ui/components/atoms/Button'
+import FormattedDateTime from '@polar-sh/ui/components/atoms/FormattedDateTime'
 import ShadowBox from '@polar-sh/ui/components/atoms/ShadowBox'
-import { useThemePreset } from '@polar-sh/ui/hooks/theming'
+import { getThemePreset } from '@polar-sh/ui/hooks/theming'
 import { formatCurrencyAndAmount } from '@polar-sh/ui/lib/money'
+import { useTheme } from 'next-themes'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { useMemo, useState } from 'react'
-import { twMerge } from 'tailwind-merge'
 import CustomerPortalSubscription from '../CustomerPortal/CustomerPortalSubscription'
 import { InlineModal } from '../Modal/InlineModal'
 import { useModal } from '../Modal/useModal'
@@ -39,8 +41,10 @@ const CustomerSubscriptionDetails = ({
   const [showChangePlanModal, setShowChangePlanModal] = useState(false)
   const [showCancelModal, setShowCancelModal] = useState(false)
 
-  const themePreset = useThemePreset(
-    subscription.product.organization.slug === 'midday' ? 'midday' : 'polar',
+  const theme = useTheme()
+  const themePreset = getThemePreset(
+    subscription.product.organization.slug,
+    theme.resolvedTheme as 'light' | 'dark',
   )
 
   const {
@@ -59,12 +63,17 @@ const CustomerSubscriptionDetails = ({
 
   const organization = subscription.product.organization
 
+  const showSubscriptionUpdates =
+    organization.customer_portal_settings.subscription.update_plan === true
+
   const uncancelSubscription = useCustomerUncancelSubscription(api)
+  const router = useRouter()
 
   const primaryAction = useMemo(() => {
     if (
-      organization.subscription_settings.allow_customer_updates &&
-      !isCanceled
+      showSubscriptionUpdates &&
+      !isCanceled &&
+      subscription.status !== 'trialing'
     ) {
       return {
         label: 'Change Plan',
@@ -86,42 +95,73 @@ const CustomerSubscriptionDetails = ({
         onClick: async () => {
           await uncancelSubscription.mutateAsync({ id: subscription.id })
           await revalidate(`customer_portal`)
+          router.refresh()
         },
       }
     }
 
     return null
-  }, [subscription, isCanceled, organization, uncancelSubscription])
+  }, [
+    subscription,
+    isCanceled,
+    showSubscriptionUpdates,
+    uncancelSubscription,
+    router,
+  ])
+
+  const subscriptionBaseAmount = useMemo(() => {
+    const price = subscription.product.prices.find(
+      ({ amount_type }) => amount_type === 'fixed' || amount_type === 'custom',
+    )
+
+    if (!price) {
+      return null
+    }
+
+    // This should be obsolete but I don't think we have proper type guards for the generated schema
+    if ('price_amount' in price) {
+      return price.price_amount
+    }
+
+    return null
+  }, [subscription])
 
   if (!organization) {
     return null
   }
 
   return (
-    <ShadowBox
-      className={twMerge(
-        'flex w-full flex-col gap-y-6 dark:border-transparent',
-        themePreset.polar.well,
-      )}
-    >
+    <ShadowBox className="dark:bg-polar-900 flex w-full flex-col gap-y-6 bg-gray-50 dark:border-transparent">
       <div className="flex flex-row items-start justify-between">
-        <div className="flex flex-col gap-y-4">
-          <h3 className="truncate text-2xl">{subscription.product.name}</h3>
+        <div className="flex flex-row items-baseline gap-x-6">
+          <h3 className="truncate text-xl">{subscription.product.name}</h3>
+          <div className="dark:text-polar-500 text-xl text-gray-500">
+            {subscription.amount && subscription.currency ? (
+              <span className="flex flex-row justify-end gap-x-1">
+                {subscriptionBaseAmount &&
+                  subscription.amount !== subscriptionBaseAmount && (
+                    <span className="text-gray-500 line-through">
+                      {formatCurrencyAndAmount(
+                        subscriptionBaseAmount,
+                        subscription.currency,
+                        subscriptionBaseAmount % 100 === 0 ? 0 : 2,
+                      )}
+                    </span>
+                  )}
+                <AmountLabel
+                  amount={subscription.amount}
+                  currency={subscription.currency}
+                  interval={subscription.recurring_interval}
+                  intervalCount={subscription.recurring_interval_count}
+                />
+              </span>
+            ) : (
+              <span>Free</span>
+            )}
+          </div>
         </div>
       </div>
       <div className="flex flex-col gap-y-2 text-sm">
-        <div className="flex flex-row items-center justify-between">
-          <span className="dark:text-polar-500 text-gray-500">Amount</span>
-          {subscription.amount && subscription.currency ? (
-            <AmountLabel
-              amount={subscription.amount}
-              currency={subscription.currency}
-              interval={subscription.recurring_interval}
-            />
-          ) : (
-            'Free'
-          )}
-        </div>
         <div className="flex flex-row items-center justify-between">
           <span className="dark:text-polar-500 text-gray-500">Status</span>
           <SubscriptionStatusLabel subscription={subscription} />
@@ -132,32 +172,42 @@ const CustomerSubscriptionDetails = ({
               Start Date
             </span>
             <span>
-              {new Date(subscription.started_at).toLocaleDateString('en-US', {
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric',
-              })}
+              <FormattedDateTime
+                datetime={subscription.started_at}
+                dateStyle="long"
+              />
             </span>
           </div>
         )}
-        {!subscription.ended_at && subscription.current_period_end && (
+        {subscription.trial_end && subscription.status === 'trialing' ? (
           <div className="flex flex-row items-center justify-between">
             <span className="dark:text-polar-500 text-gray-500">
-              {subscription.cancel_at_period_end
-                ? 'Expiry Date'
-                : 'Renewal Date'}
+              Trial Ends
             </span>
             <span>
-              {new Date(subscription.current_period_end).toLocaleDateString(
-                'en-US',
-                {
-                  year: 'numeric',
-                  month: 'long',
-                  day: 'numeric',
-                },
-              )}
+              <FormattedDateTime
+                datetime={subscription.trial_end}
+                dateStyle="long"
+              />
             </span>
           </div>
+        ) : (
+          !subscription.ended_at &&
+          subscription.current_period_end && (
+            <div className="flex flex-row items-center justify-between">
+              <span className="dark:text-polar-500 text-gray-500">
+                {subscription.cancel_at_period_end
+                  ? 'Expiry Date'
+                  : 'Renewal Date'}
+              </span>
+              <span>
+                <FormattedDateTime
+                  datetime={subscription.current_period_end}
+                  dateStyle="long"
+                />
+              </span>
+            </div>
+          )
         )}
         {subscription.meters.length > 0 && (
           <div className="flex flex-col gap-y-4 py-2">
@@ -186,11 +236,10 @@ const CustomerSubscriptionDetails = ({
           <div className="flex flex-row items-center justify-between">
             <span className="dark:text-polar-500 text-gray-500">Expired</span>
             <span>
-              {new Date(subscription.ended_at).toLocaleDateString('en-US', {
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric',
-              })}
+              <FormattedDateTime
+                datetime={subscription.ended_at}
+                dateStyle="long"
+              />
             </span>
           </div>
         )}
@@ -199,20 +248,14 @@ const CustomerSubscriptionDetails = ({
       <div className="flex flex-row gap-4">
         {primaryAction && (
           <Button
-            size="lg"
             onClick={primaryAction.onClick}
             loading={primaryAction.loading}
-            className={themePreset.polar.button}
           >
             {primaryAction.label}
           </Button>
         )}
         <Button
-          size="lg"
-          className={twMerge(
-            'hidden md:flex',
-            themePreset.polar.buttonSecondary,
-          )}
+          className="hidden md:flex"
           variant="secondary"
           onClick={showBenefitGrantsModal}
         >
@@ -222,20 +265,13 @@ const CustomerSubscriptionDetails = ({
           className="md:hidden"
           href={`/${organization.slug}/portal/subscriptions/${subscription.id}?customer_session_token=${customerSessionToken}`}
         >
-          <Button
-            size="lg"
-            variant="secondary"
-            className={themePreset.polar.buttonSecondary}
-          >
-            View Subscription
-          </Button>
+          <Button variant="secondary">View Subscription</Button>
         </Link>
         <CustomerCancellationModal
           isShown={showCancelModal}
           hide={() => setShowCancelModal(false)}
           subscription={subscription}
           cancelSubscription={cancelSubscription}
-          themingPreset={themePreset}
         />
       </div>
 
@@ -250,7 +286,6 @@ const CustomerSubscriptionDetails = ({
             subscription={subscription}
             hide={() => setShowChangePlanModal(false)}
             onUserSubscriptionUpdate={onUserSubscriptionUpdate}
-            themingPreset={themePreset}
           />
         }
       />
@@ -264,7 +299,6 @@ const CustomerSubscriptionDetails = ({
               api={api}
               customerSessionToken={customerSessionToken}
               subscription={subscription}
-              themingPreset={themePreset}
             />
           </div>
         }

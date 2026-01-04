@@ -5,6 +5,9 @@ name: "Client: Next.JS Bundle Analyzis 🧐"
 
 on:
   pull_request:
+    paths:
+      - "clients/**"
+      - ".github/workflows/nextjs_bundle_analysis.yml"
   push:
     branches:
       - main # change this if your default branch is named differently
@@ -29,14 +32,14 @@ jobs:
       VERCEL_ENV: "testing"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 10.5.2
+          package_json_file: clients/package.json
 
       - name: Setup Node.js environment
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version-file: clients/.node-version
           cache: "pnpm"
@@ -46,26 +49,29 @@ jobs:
         working-directory: ./clients
         run: pnpm install
 
-      - uses: actions/cache@v4
+      - name: Restore next build
+        uses: actions/cache@v5
+        id: restore-build-cache
+        env:
+          cache-name: cache-next-build
         with:
-          path: |
-            ./clients/apps/web/.next
-          key: next-${{ hashFiles('./clients/pnpm-lock.yaml') }}-${{ github.sha }}
-          restore-keys: |
-            next-${{ hashFiles('./clients/pnpm-lock.yaml') }}-
-            next-
+          # if you use a custom build directory, replace all instances of `.next` in this file with your build directory
+          # ex: if your app builds to `dist`, replace `.next` with `dist`
+          path: .next/cache
+          # change this if you prefer a more strict cache
+          key: ${{ runner.os }}-build-${{ env.cache-name }}
 
-      - name: Build
+      - name: Build next.js app
         working-directory: ./clients
         run: pnpm build
 
       # Here's the first place where next-bundle-analysis' own script is used
       # This step pulls the raw bundle stats for the current bundle
       - name: Analyze bundle
-        run: node report-bundle-size.js
+        run: npx -p nextjs-bundle-analysis report
 
       - name: Upload bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bundle
           path: ./clients/apps/web/.next/analyze/__bundle_analysis.json
@@ -105,22 +111,22 @@ jobs:
           echo EOF >> $GITHUB_OUTPUT
 
       - name: Find Comment
-        uses: peter-evans/find-comment@v3
+        uses: peter-evans/find-comment@v4
         if: success() && github.event.number
         id: fc
         with:
           issue-number: ${{ github.event.number }}
-          body-includes: "<!-- __NEXTJS_BUNDLE"
+          body-includes: "<!-- __NEXTJS_BUNDLE -->"
 
       - name: Create Comment
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@v5
         if: success() && github.event.number && steps.fc.outputs.comment-id == 0
         with:
           issue-number: ${{ github.event.number }}
           body: ${{ steps.get-comment-body.outputs.body }}
 
       - name: Update Comment
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@v5
         if: success() && github.event.number && steps.fc.outputs.comment-id != 0
         with:
           issue-number: ${{ github.event.number }}

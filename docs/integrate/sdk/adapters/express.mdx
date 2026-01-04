@@ -3,9 +3,31 @@ title: "Express"
 description: "Payments and Checkouts made dead simple with Express"
 ---
 
-```bash
-pnpm install @polar-sh/express zod
-```
+## Examples
+
+- [With Express v4](https://github.com/polarsource/examples/tree/main/with-express-v4)
+
+## Installation
+
+Install the required Polar packages using the following command:
+
+<Tabs>
+  <Tab title="npm">
+    ```bash Terminal
+    npm install zod @polar-sh/express
+    ```
+  </Tab>
+  <Tab title="yarn">
+    ```bash Terminal
+    yarn add zod @polar-sh/express
+    ```
+  </Tab>
+  <Tab title="pnpm">
+    ```bash Terminal
+    pnpm add zod @polar-sh/express
+    ```
+  </Tab>
+</Tabs>
 
 ## Checkout
 
@@ -22,6 +44,7 @@ app.get(
   Checkout({
     accessToken: "xxx", // Or set an environment variable to POLAR_ACCESS_TOKEN
     successUrl: process.env.SUCCESS_URL,
+    returnUrl: "https://myapp.com", // An optional URL which renders a back-button in the Checkout
     server: "sandbox", // Use sandbox if you're testing Polar - omit the parameter or pass 'production' otherwise
     theme: "dark", // Enforces the theme - System-preferred theme will be set if left omitted
   })
@@ -54,6 +77,7 @@ app.get(
   CustomerPortal({
     accessToken: "xxx", // Or set an environment variable to POLAR_ACCESS_TOKEN
     getCustomerId: (event) => "", // Function to resolve a Polar Customer ID
+    returnUrl: "https://myapp.com", // An optional URL which renders a back-button in the Customer Portal
     server: "sandbox", // Use sandbox if you're testing Polar - omit the parameter or pass 'production' otherwise
   })
 );

@@ -8,32 +8,43 @@
   "scripts": {
     "dev": "email dev --dir src/emails",
     "clean": "rm -rf dist bin",
-    "build": "pnpm run clean && tsup && pkg package.json"
+    "types": "uv --directory .. run python -m polar.email.schemas | openapi-typescript --output src/types/openapi.ts && prettier src/types/openapi.ts --write",
+    "build": "pnpm run clean && tsup && pkg package.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "prettier src/** --write"
   },
   "packageManager": "pnpm@10.5.2",
   "dependencies": {
-    "@react-email/components": "^0.0.36",
-    "@react-email/render": "^1.0.6",
-    "commander": "^13.1.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "@react-email/components": "^1.0.1",
+    "@react-email/render": "^2.0.0",
+    "commander": "^14.0.2",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
   },
   "devDependencies": {
-    "@types/node": "^22.14.1",
-    "@types/react": "^19.1.2",
-    "@types/react-dom": "^19.1.2",
-    "@yao-pkg/pkg": "^6.4.0",
-    "prettier": "^3.5.3",
-    "prettier-plugin-organize-imports": "^4.1.0",
-    "prettier-plugin-tailwindcss": "^0.6.11",
-    "react-email": "^4.0.7",
-    "tsup": "^8.4.0",
-    "typescript": "^5.8.3"
+    "@react-email/preview-server": "^5.0.8",
+    "@types/node": "^22.19.3",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@yao-pkg/pkg": "^6.11.0",
+    "openapi-typescript": "^7.10.1",
+    "prettier": "^3.7.4",
+    "prettier-plugin-organize-imports": "^4.3.0",
+    "prettier-plugin-tailwindcss": "^0.7.2",
+    "react-email": "^5.0.8",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
   },
   "pkg": {
     "targets": [
       "host"
     ],
     "outputPath": "bin"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp"
+    ]
   }
 }

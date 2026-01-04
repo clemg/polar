@@ -2,11 +2,23 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
+from alembic_utils.pg_extension import PGExtension
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from polar.config import settings
 from polar.models import Model
+
+
+def include_object(object, name, type_, reflected, compare_to):
+    # Exclude TimescaleDB - Docker image handles creation, migration is backup
+    if isinstance(object, PGExtension) and object.signature == "timescaledb":
+        return False
+    # Exclude TimescaleDB auto-created index on hypertable partitioning column
+    if type_ == "index" and name == "events_hyper_ingested_at_idx":
+        return False
+    return True
+
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -23,7 +35,11 @@ if config.config_file_name is not None:
 # target_metadata = mymodel.Base.metadata
 target_metadata = Model.metadata
 
-config.set_main_option("sqlalchemy.url", settings.get_postgres_dsn("asyncpg"))
+config.set_main_option(
+    "sqlalchemy.url",
+    # Escape %-encoding signs to avoid Alembic treating them as interpolation markers
+    settings.get_postgres_dsn("asyncpg").replace("%", "%%"),
+)
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -50,6 +66,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -58,7 +75,10 @@ def run_migrations_offline() -> None:
 
 def do_run_migrations(connection):
     context.configure(
-        connection=connection, target_metadata=target_metadata, compare_type=True
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():

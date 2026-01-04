@@ -1,6 +1,6 @@
 import { useUpdateCustomerPortal } from '@/hooks/queries'
 import { setValidationErrors } from '@/utils/api/errors'
-import type { Client, schemas } from '@polar-sh/client'
+import { enums, type Client, type schemas } from '@polar-sh/client'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import CountryPicker from '@polar-sh/ui/components/atoms/CountryPicker'
 import CountryStatePicker from '@polar-sh/ui/components/atoms/CountryStatePicker'
@@ -13,25 +13,21 @@ import {
   FormLabel,
   FormMessage,
 } from '@polar-sh/ui/components/ui/form'
-import { ThemingPresetProps } from '@polar-sh/ui/hooks/theming'
 import { useCallback, useEffect } from 'react'
 import { useForm } from 'react-hook-form'
-import { twMerge } from 'tailwind-merge'
-
 const EditBillingDetails = ({
   api,
   customer,
   onSuccess,
-  themingPreset,
 }: {
   api: Client
   customer: schemas['CustomerPortalCustomer']
   onSuccess: () => void
-  themingPreset: ThemingPresetProps
 }) => {
   const form = useForm<schemas['CustomerPortalCustomerUpdate']>({
     defaultValues: {
-      ...customer,
+      billing_name: customer.billing_name || customer.name,
+      billing_address: customer.billing_address as schemas['AddressInput'],
       tax_id: customer.tax_id ? customer.tax_id[0] : null,
     },
   })
@@ -66,56 +62,47 @@ const EditBillingDetails = ({
       }
 
       reset({
-        ...updatedCustomer,
+        billing_name: updatedCustomer.billing_name || updatedCustomer.name,
+        billing_address: updatedCustomer.billing_address as
+          | schemas['AddressInput']
+          | null,
         tax_id: updatedCustomer.tax_id ? updatedCustomer.tax_id[0] : null,
       })
 
       onSuccess()
     },
-    [updateCustomer, onSuccess, setError],
+    [updateCustomer, onSuccess, setError, reset],
   )
 
   return (
     <Form {...form}>
       <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-y-6">
+        <FormItem>
+          <FormLabel>Email</FormLabel>
+          <FormControl>
+            <Input
+              type="email"
+              value={customer.email}
+              disabled
+              readOnly
+              className="bg-white shadow-xs"
+            />
+          </FormControl>
+        </FormItem>
         <FormField
           control={control}
-          name="email"
-          rules={{
-            required: 'This field is required',
-          }}
+          name="billing_name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Email</FormLabel>
+              <FormLabel>Billing Name</FormLabel>
               <FormControl>
                 <Input
-                  type="email"
-                  autoComplete="email"
+                  type="text"
+                  autoComplete="organization"
+                  placeholder="Company or legal name for invoices (optional)"
                   {...field}
                   value={field.value || ''}
-                  className={themingPreset.polar.input}
-                />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        <FormField
-          control={control}
-          name="name"
-          rules={{
-            required: 'This field is required',
-          }}
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Name</FormLabel>
-              <FormControl>
-                <Input
-                  type="name"
-                  autoComplete="name"
-                  {...field}
-                  value={field.value || ''}
-                  className={themingPreset.polar.input}
+                  className="bg-white shadow-xs"
                 />
               </FormControl>
               <FormMessage />
@@ -137,7 +124,7 @@ const EditBillingDetails = ({
                     type="text"
                     autoComplete="billing address-line1"
                     placeholder="Line 1"
-                    className={themingPreset.polar.input}
+                    className="bg-white shadow-xs"
                     {...field}
                     value={field.value || ''}
                   />
@@ -156,7 +143,7 @@ const EditBillingDetails = ({
                     type="text"
                     autoComplete="billing address-line2"
                     placeholder="Line 2"
-                    className={themingPreset.polar.input}
+                    className="bg-white shadow-xs"
                     {...field}
                     value={field.value || ''}
                   />
@@ -180,7 +167,7 @@ const EditBillingDetails = ({
                       type="text"
                       autoComplete="billing postal-code"
                       placeholder="Postal code"
-                      className={themingPreset.polar.input}
+                      className="bg-white shadow-xs"
                       {...field}
                       value={field.value || ''}
                     />
@@ -202,7 +189,7 @@ const EditBillingDetails = ({
                       type="text"
                       autoComplete="billing address-level2"
                       placeholder="City"
-                      className={themingPreset.polar.input}
+                      className="bg-white shadow-xs"
                       {...field}
                       value={field.value || ''}
                     />
@@ -225,8 +212,7 @@ const EditBillingDetails = ({
                     autoComplete="billing country"
                     value={field.value || undefined}
                     onChange={field.onChange}
-                    className={themingPreset.polar.dropdown}
-                    itemClassName={themingPreset.polar.dropdownItem}
+                    allowedCountries={enums.addressInputCountryValues}
                   />
                   <FormMessage />
                 </div>
@@ -248,8 +234,6 @@ const EditBillingDetails = ({
                       country={country}
                       value={field.value || undefined}
                       onChange={field.onChange}
-                      className={themingPreset.polar.dropdown}
-                      itemClassName={themingPreset.polar.dropdownItem}
                     />
                     <FormMessage />
                   </div>
@@ -276,7 +260,7 @@ const EditBillingDetails = ({
                   autoComplete="off"
                   {...field}
                   value={field.value || ''}
-                  className={themingPreset.polar.input}
+                  className="bg-white shadow-xs"
                 />
               </FormControl>
               <FormMessage />
@@ -287,7 +271,7 @@ const EditBillingDetails = ({
           type="submit"
           loading={updateCustomer.isPending}
           disabled={updateCustomer.isPending || !isDirty}
-          className={twMerge('self-start', themingPreset.polar.button)}
+          className="self-start"
         >
           Update Billing Details
         </Button>

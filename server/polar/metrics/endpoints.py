@@ -10,24 +10,31 @@ from polar.kit.schemas import MultipleQueryFilter
 from polar.kit.time_queries import (
     MAX_INTERVAL_DAYS,
     MIN_DATE,
+    MIN_INTERVAL_DAYS,
     TimeInterval,
     is_under_limits,
 )
 from polar.models.product import ProductBillingType
 from polar.openapi import APITag
 from polar.organization.schemas import OrganizationID
-from polar.postgres import AsyncSession, get_db_session
+from polar.postgres import AsyncReadSession, get_db_read_session
 from polar.product.schemas import ProductID
 from polar.routing import APIRouter
 
 from . import auth
+from .metrics import METRICS
 from .schemas import MetricsLimits, MetricsResponse
 from .service import metrics as metrics_service
 
-router = APIRouter(prefix="/metrics", tags=["metrics", APITag.documented, APITag.mcp])
+router = APIRouter(prefix="/metrics", tags=["metrics", APITag.public, APITag.mcp])
 
 
-@router.get("/", summary="Get Metrics", response_model=MetricsResponse)
+@router.get(
+    "/",
+    summary="Get Metrics",
+    response_model=MetricsResponse,
+    response_model_exclude_none=True,
+)
 async def get(
     auth_subject: auth.MetricsRead,
     start_date: date = Query(
@@ -59,7 +66,16 @@ async def get(
     customer_id: MultipleQueryFilter[CustomerID] | None = Query(
         None, title="CustomerID Filter", description="Filter by customer ID."
     ),
-    session: AsyncSession = Depends(get_db_session),
+    metrics: list[str] | None = Query(
+        None,
+        title="Metrics",
+        description=(
+            "List of metric slugs to focus on. "
+            "When provided, only the queries needed for these metrics will be executed, "
+            "improving performance. If not provided, all metrics are returned."
+        ),
+    ),
+    session: AsyncReadSession = Depends(get_db_read_session),
 ) -> MetricsResponse:
     """
     Get metrics about your orders and subscriptions.
@@ -81,6 +97,21 @@ async def get(
             ]
         )
 
+    if metrics is not None:
+        valid_slugs = {m.slug for m in METRICS}
+        invalid_slugs = set(metrics) - valid_slugs
+        if invalid_slugs:
+            raise PolarRequestValidationError(
+                [
+                    {
+                        "loc": ("query", "metrics"),
+                        "msg": f"Invalid metric slugs: {', '.join(sorted(invalid_slugs))}",
+                        "type": "value_error",
+                        "input": metrics,
+                    }
+                ]
+            )
+
     return await metrics_service.get_metrics(
         session,
         auth_subject,
@@ -92,6 +123,7 @@ async def get(
         product_id=product_id,
         billing_type=billing_type,
         customer_id=customer_id,
+        metrics=metrics,
     )
 
 
@@ -102,8 +134,11 @@ async def limits(auth_subject: auth.MetricsRead) -> MetricsLimits:
         {
             "min_date": MIN_DATE,
             "intervals": {
-                interval.value: {"max_days": days}
-                for interval, days in MAX_INTERVAL_DAYS.items()
+                interval.value: {
+                    "min_days": MIN_INTERVAL_DAYS[interval],
+                    "max_days": MAX_INTERVAL_DAYS[interval],
+                }
+                for interval in TimeInterval
             },
         }
     )

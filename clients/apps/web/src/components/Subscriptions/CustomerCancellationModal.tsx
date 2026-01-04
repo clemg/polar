@@ -19,7 +19,7 @@ import {
   RadioGroup,
   RadioGroupItem,
 } from '@polar-sh/ui/components/ui/radio-group'
-import { ThemingPresetProps } from '@polar-sh/ui/hooks/theming'
+import { useRouter } from 'next/navigation'
 import { useCallback } from 'react'
 import { useForm } from 'react-hook-form'
 import { toast } from '../Toast/use-toast'
@@ -41,21 +41,23 @@ const CancellationReasonRadio = ({
   )
 }
 
-interface CustomerCancellationModalProps
-  extends Omit<ModalProps, 'modalContent'> {
+interface CustomerCancellationModalProps extends Omit<
+  ModalProps,
+  'title' | 'modalContent'
+> {
   subscription: schemas['CustomerSubscription']
   cancelSubscription: ReturnType<typeof useCustomerCancelSubscription>
   onAbort?: () => void
-  themingPreset: ThemingPresetProps
 }
 
 const CustomerCancellationModal = ({
   subscription,
   cancelSubscription,
   onAbort,
-  themingPreset,
   ...props
 }: CustomerCancellationModalProps) => {
+  const router = useRouter()
+
   const handleCancel = useCallback(() => {
     onAbort?.()
     props.hide()
@@ -91,9 +93,10 @@ const CustomerCancellationModal = ({
         title: 'Subscription Cancelled',
         description: `Subscription was cancelled successfully`,
       })
+      router.refresh()
       props.hide()
     },
-    [subscription.id, cancelSubscription, setError, props],
+    [subscription.id, cancelSubscription, setError, props, router],
   )
 
   const onReasonSelect = (value: schemas['CustomerCancellationReason']) => {
@@ -103,12 +106,13 @@ const CustomerCancellationModal = ({
   return (
     <Modal
       {...props}
+      title="Cancel Subscription"
       className="md:min-w-[600px]"
       modalContent={
-        <div className="flex flex-col gap-y-6 p-12">
+        <div className="flex flex-col gap-y-6 p-6 sm:p-12">
           <div className="flex flex-col gap-y-2">
             <h3 className="text-2xl">We&apos;re sorry to see you go!</h3>
-            <p className="dark:text-polar-500 text-balance leading-relaxed text-gray-500">
+            <p className="dark:text-polar-500 leading-relaxed text-balance text-gray-500">
               You&apos;re always welcome back! Let us know why you&apos;re
               leaving to help us improve our product.
             </p>
@@ -167,7 +171,7 @@ const CustomerCancellationModal = ({
                 control={control}
                 name="cancellation_comment"
                 render={({ field }) => (
-                  <FormItem className="mt-8">
+                  <FormItem className="mt-6">
                     <FormControl>
                       <TextArea
                         {...field}
@@ -179,21 +183,16 @@ const CustomerCancellationModal = ({
                   </FormItem>
                 )}
               />
-              <div className="flex flex-row gap-x-4 pt-6">
+              <div className="flex flex-col gap-4 pt-6 sm:flex-row">
                 <Button
                   type="submit"
                   variant="destructive"
                   loading={cancelSubscription.isPending}
                   disabled={cancelSubscription.isPending}
-                  className={themingPreset.polar.button}
                 >
                   Cancel Subscription
                 </Button>
-                <Button
-                  variant="ghost"
-                  onClick={handleCancel}
-                  className={themingPreset.polar.buttonSecondary}
-                >
+                <Button variant="ghost" onClick={handleCancel}>
                   I&apos;ve changed my mind
                 </Button>
               </div>

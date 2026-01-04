@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from polar.models import (
         Account,
         Customer,
+        Dispute,
         IssueReward,
         Order,
         Organization,
@@ -27,6 +28,7 @@ class Processor(StrEnum):
     """
 
     stripe = "stripe"
+    manual = "manual"
     # Legacy
     open_collective = "open_collective"
 
@@ -206,6 +208,22 @@ class Transaction(RecordModel):
     """Country for which Polar collected the tax."""
     tax_state: Mapped[str] = mapped_column(String(2), nullable=True, index=True)
     """State for which Polar collected the tax."""
+    presentment_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    """Amount in cents of this transaction from customer's perspective."""
+    presentment_tax_amount: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )
+    """Amount of tax in the presentment currency collected by Polar for this payment."""
+    presentment_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    """Currency in which the customer made the payment."""
+    tax_filing_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    """Amount of tax filed to the jurisdiction by Polar for this payment."""
+    tax_filing_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    """Currency in which the tax was filed to the jurisdiction by Polar."""
+    tax_processor_id: Mapped[str | None] = mapped_column(
+        String, nullable=True, default=None
+    )
+    """ID of the tax transaction in the tax processor system."""
 
     processor_fee_type: Mapped[ProcessorFeeType | None] = mapped_column(
         String, nullable=True, index=True
@@ -236,10 +254,6 @@ class Transaction(RecordModel):
     """ID of the customer in the payment processor system."""
     charge_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     """ID of the charge (payment) in the payment processor system."""
-    refund_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
-    """ID of the refund in the payment processor system."""
-    dispute_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
-    """ID of the dispute in the payment processor system."""
     transfer_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     """ID of the transfer in the payment processor system."""
     transfer_reversal_id: Mapped[str | None] = mapped_column(
@@ -370,9 +384,7 @@ class Transaction(RecordModel):
             back_populates="balance_transactions",
         )
 
-    # TODO: Hopefully temporary naming. Want to prefix all processor IDs
-    # with `processor_` here and be able to rename this then to `refund_id`
-    polar_refund_id: Mapped[UUID | None] = mapped_column(
+    refund_id: Mapped[UUID | None] = mapped_column(
         Uuid,
         ForeignKey("refunds.id", ondelete="set null"),
         nullable=True,
@@ -383,6 +395,18 @@ class Transaction(RecordModel):
     @declared_attr
     def refund(cls) -> Mapped["Refund | None"]:
         return relationship("Refund", lazy="raise")
+
+    dispute_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("disputes.id", ondelete="set null"),
+        nullable=True,
+        index=True,
+    )
+    """ID of the `Dispute` related to this transaction."""
+
+    @declared_attr
+    def dispute(cls) -> Mapped["Dispute | None"]:
+        return relationship("Dispute", lazy="raise")
 
     payout_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("payouts.id"), nullable=True, index=True

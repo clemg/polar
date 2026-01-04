@@ -5,7 +5,6 @@ from typing import Any
 from sqlalchemy import UnaryExpression, asc, desc, func, or_
 from sqlalchemy.orm import joinedload
 from sqlalchemy_utils.types.range import timedelta
-from stripe import Customer as StripeCustomer
 
 from polar.auth.models import AuthSubject
 from polar.benefit.grant.repository import BenefitGrantRepository
@@ -14,22 +13,23 @@ from polar.exceptions import PolarRequestValidationError, ValidationError
 from polar.kit.metadata import MetadataQuery, apply_metadata_clause
 from polar.kit.pagination import PaginationParams
 from polar.kit.sorting import Sorting
-from polar.models import (
-    BenefitGrant,
-    Customer,
-    Organization,
-    User,
-)
+from polar.member import member_service
+from polar.member.schemas import Member as MemberSchema
+from polar.models import BenefitGrant, Customer, Organization, User
 from polar.models.webhook_endpoint import CustomerWebhookEventType, WebhookEventType
 from polar.organization.resolver import get_payload_organization
-from polar.postgres import AsyncSession
+from polar.postgres import AsyncReadSession, AsyncSession
 from polar.redis import Redis
 from polar.subscription.repository import SubscriptionRepository
 from polar.webhook.service import webhook as webhook_service
 from polar.worker import enqueue_job
 
 from .repository import CustomerRepository
-from .schemas.customer import CustomerCreate, CustomerUpdate, CustomerUpdateExternalID
+from .schemas.customer import (
+    CustomerCreate,
+    CustomerUpdate,
+    CustomerUpdateExternalID,
+)
 from .schemas.state import CustomerState
 from .sorting import CustomerSortProperty
 
@@ -37,7 +37,7 @@ from .sorting import CustomerSortProperty
 class CustomerService:
     async def list(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         *,
         organization_id: Sequence[uuid.UUID] | None = None,
@@ -66,6 +66,7 @@ class CustomerService:
                 or_(
                     Customer.email.ilike(f"%{query}%"),
                     Customer.name.ilike(f"%{query}%"),
+                    Customer.external_id.ilike(f"{query}%"),
                 )
             )
 
@@ -86,7 +87,7 @@ class CustomerService:
 
     async def get(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         id: uuid.UUID,
     ) -> Customer | None:
@@ -98,7 +99,7 @@ class CustomerService:
 
     async def get_external(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         external_id: str,
     ) -> Customer | None:
@@ -149,11 +150,29 @@ class CustomerService:
         if errors:
             raise PolarRequestValidationError(errors)
 
-        customer = Customer(
-            organization=organization,
-            **customer_create.model_dump(exclude={"organization_id"}, by_alias=True),
-        )
-        return await repository.create(customer)
+        async with repository.create_context(
+            Customer(
+                organization=organization,
+                **customer_create.model_dump(
+                    exclude={"organization_id", "owner"}, by_alias=True
+                ),
+            )
+        ) as customer:
+            owner_email = customer_create.owner.email if customer_create.owner else None
+            owner_name = customer_create.owner.name if customer_create.owner else None
+            owner_external_id = (
+                customer_create.owner.external_id if customer_create.owner else None
+            )
+
+            await member_service.create_owner_member(
+                session,
+                customer,
+                organization,
+                owner_email=owner_email,
+                owner_name=owner_name,
+                owner_external_id=owner_external_id,
+            )
+            return customer
 
     async def update(
         self,
@@ -181,7 +200,7 @@ class CustomerService:
                     }
                 )
 
-            # Reset verification status
+            customer.email = customer_update.email
             customer.email_verified = False
 
         if (
@@ -221,7 +240,9 @@ class CustomerService:
 
         return await repository.update(
             customer,
-            update_dict=customer_update.model_dump(exclude_unset=True, by_alias=True),
+            update_dict=customer_update.model_dump(
+                exclude={"email"}, exclude_unset=True, by_alias=True
+            ),
         )
 
     async def delete(self, session: AsyncSession, customer: Customer) -> Customer:
@@ -233,21 +254,20 @@ class CustomerService:
 
     async def get_state(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         redis: Redis,
         customer: Customer,
         cache: bool = True,
     ) -> CustomerState:
         # 👋 Whenever you change the state schema,
         # please also update the cache key with a version number.
-        cache_key = f"polar:customer_state:v2:{customer.id}"
+        cache_key = f"polar:customer_state:v3:{customer.id}"
 
         if cache:
             raw_state = await redis.get(cache_key)
             if raw_state is not None:
                 return CustomerState.model_validate_json(raw_state)
 
-        # If not cached, fetch from the database
         subscription_repository = SubscriptionRepository.from_session(session)
         customer.active_subscriptions = (
             await subscription_repository.list_active_by_customer(customer.id)
@@ -275,53 +295,6 @@ class CustomerService:
 
         return state
 
-    async def get_or_create_from_stripe_customer(
-        self,
-        session: AsyncSession,
-        stripe_customer: StripeCustomer,
-        organization: Organization,
-    ) -> Customer:
-        """
-        Get or create a customer from a Stripe customer object.
-
-        Make a first lookup by the Stripe customer ID, then by the email address.
-
-        If the customer does not exist, create a new one.
-        """
-        repository = CustomerRepository.from_session(session)
-
-        created = False
-        customer = await repository.get_by_stripe_customer_id_and_organization(
-            stripe_customer.id, organization.id
-        )
-        assert stripe_customer.email is not None
-
-        if customer is None:
-            customer = await repository.get_by_email_and_organization(
-                stripe_customer.email, organization.id
-            )
-
-        if customer is None:
-            customer = Customer(
-                email=stripe_customer.email,
-                email_verified=False,
-                stripe_customer_id=stripe_customer.id,
-                name=stripe_customer.name,
-                billing_address=stripe_customer.address,
-                # TODO: tax_id,
-                organization=organization,
-            )
-            created = True
-
-        customer.stripe_customer_id = stripe_customer.id
-
-        if created:
-            customer = await repository.create(customer)
-        else:
-            customer = await repository.update(customer)
-
-        return customer
-
     async def webhook(
         self,
         session: AsyncSession,
@@ -329,7 +302,6 @@ class CustomerService:
         event_type: CustomerWebhookEventType,
         customer: Customer,
     ) -> None:
-        data: CustomerState | Customer
         if event_type == WebhookEventType.customer_state_changed:
             data = await self.get_state(session, redis, customer, cache=False)
             await webhook_service.send(
@@ -339,7 +311,6 @@ class CustomerService:
                 data,
             )
         else:
-            data = customer
             await webhook_service.send(
                 session, customer.organization, event_type, customer
             )
@@ -353,6 +324,14 @@ class CustomerService:
             await self.webhook(
                 session, redis, WebhookEventType.customer_state_changed, customer
             )
+
+    async def load_members(
+        self,
+        session: AsyncReadSession,
+        customer_id: uuid.UUID,
+    ) -> Sequence[MemberSchema]:
+        members = await member_service.list_by_customer(session, customer_id)
+        return [MemberSchema.model_validate(member) for member in members]
 
 
 customer = CustomerService()

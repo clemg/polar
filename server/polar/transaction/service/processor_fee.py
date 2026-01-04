@@ -4,7 +4,7 @@ from typing import Literal
 from polar.enums import PaymentProcessor
 from polar.integrations.stripe.service import stripe as stripe_service
 from polar.integrations.stripe.utils import get_expandable_id
-from polar.models import Refund, Transaction
+from polar.models import Dispute, Refund, Transaction
 from polar.models.transaction import Processor, ProcessorFeeType, TransactionType
 from polar.postgres import AsyncSession
 
@@ -12,6 +12,15 @@ from .base import BaseTransactionService, BaseTransactionServiceError
 
 
 class ProcessorFeeTransactionError(BaseTransactionServiceError): ...
+
+
+class BalanceTransactionNotFound(ProcessorFeeTransactionError):
+    def __init__(self, payment_transaction: Transaction) -> None:
+        message = (
+            f"Balance transaction not found for payment transaction "
+            f"{payment_transaction.id} with charge ID {payment_transaction.charge_id}"
+        )
+        super().__init__(message)
 
 
 class UnsupportedStripeFeeType(ProcessorFeeTransactionError):
@@ -56,6 +65,10 @@ def _get_stripe_processor_fee_type(description: str) -> ProcessorFeeType:
         return ProcessorFeeType.security
     if "payments" in description:
         return ProcessorFeeType.payment
+    if "card dispute countered fee" in description:
+        return ProcessorFeeType.dispute
+    if "smart disputes" in description:
+        return ProcessorFeeType.dispute
     raise UnsupportedStripeFeeType(description)
 
 
@@ -73,24 +86,25 @@ class ProcessorFeeTransactionService(BaseTransactionService):
 
         charge = await stripe_service.get_charge(payment_transaction.charge_id)
 
-        # Payment fee
-        if charge.balance_transaction:
-            stripe_balance_transaction = await stripe_service.get_balance_transaction(
-                get_expandable_id(charge.balance_transaction)
-            )
-            payment_fee_transaction = Transaction(
-                type=TransactionType.processor_fee,
-                processor=Processor.stripe,
-                processor_fee_type=ProcessorFeeType.payment,
-                currency=payment_transaction.currency,
-                amount=-stripe_balance_transaction.fee,
-                account_currency=payment_transaction.currency,
-                account_amount=-stripe_balance_transaction.fee,
-                tax_amount=0,
-                incurred_by_transaction_id=payment_transaction.id,
-            )
-            session.add(payment_fee_transaction)
-            fee_transactions.append(payment_fee_transaction)
+        if charge.balance_transaction is None:
+            raise BalanceTransactionNotFound(payment_transaction)
+
+        stripe_balance_transaction = await stripe_service.get_balance_transaction(
+            get_expandable_id(charge.balance_transaction)
+        )
+        payment_fee_transaction = Transaction(
+            type=TransactionType.processor_fee,
+            processor=Processor.stripe,
+            processor_fee_type=ProcessorFeeType.payment,
+            currency=payment_transaction.currency,
+            amount=-stripe_balance_transaction.fee,
+            account_currency=payment_transaction.currency,
+            account_amount=-stripe_balance_transaction.fee,
+            tax_amount=0,
+            incurred_by_transaction=payment_transaction,
+        )
+        session.add(payment_fee_transaction)
+        fee_transactions.append(payment_fee_transaction)
 
         await session.flush()
 
@@ -108,9 +122,6 @@ class ProcessorFeeTransactionService(BaseTransactionService):
         is_stripe_refund = refund.processor == PaymentProcessor.stripe
         is_stripe_refund_trx = refund_transaction.processor == Processor.stripe
         if not (is_stripe_refund and is_stripe_refund_trx):
-            return fee_transactions
-
-        if refund_transaction.refund_id is None:
             return fee_transactions
 
         if refund.processor_balance_transaction_id is None:
@@ -143,19 +154,20 @@ class ProcessorFeeTransactionService(BaseTransactionService):
         self,
         session: AsyncSession,
         *,
+        dispute: Dispute,
         dispute_transaction: Transaction,
         category: Literal["dispute", "dispute_reversal"],
     ) -> list[Transaction]:
         fee_transactions: list[Transaction] = []
 
-        if dispute_transaction.processor != Processor.stripe:
+        if dispute.payment_processor != PaymentProcessor.stripe:
             return fee_transactions
 
-        if dispute_transaction.dispute_id is None:
+        if dispute.payment_processor_id is None:
             return fee_transactions
 
-        dispute = await stripe_service.get_dispute(dispute_transaction.dispute_id)
-        for balance_transaction in dispute.balance_transactions:
+        stripe_dispute = await stripe_service.get_dispute(dispute.payment_processor_id)
+        for balance_transaction in stripe_dispute.balance_transactions:
             if (
                 balance_transaction.reporting_category == category
                 and balance_transaction.fee > 0

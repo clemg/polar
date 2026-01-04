@@ -1,15 +1,13 @@
 import { useDeleteFile } from '@/hooks/queries'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import {
-  AudioFileOutlined,
-  DescriptionOutlined,
-  FolderZipOutlined,
-  ImageOutlined,
-  InsertDriveFileOutlined,
-  MoreVertOutlined,
-  VideoFileOutlined,
-} from '@mui/icons-material'
+import AudioFileOutlined from '@mui/icons-material/AudioFileOutlined'
+import DescriptionOutlined from '@mui/icons-material/DescriptionOutlined'
+import FolderZipOutlined from '@mui/icons-material/FolderZipOutlined'
+import ImageOutlined from '@mui/icons-material/ImageOutlined'
+import InsertDriveFileOutlined from '@mui/icons-material/InsertDriveFileOutlined'
+import MoreVertOutlined from '@mui/icons-material/MoreVertOutlined'
+import VideoFileOutlined from '@mui/icons-material/VideoFileOutlined'
 import Switch from '@polar-sh/ui/components/atoms/Switch'
 import {
   FocusEvent,
@@ -56,7 +54,7 @@ export const FilePreview = ({ mimeType }: { mimeType: string }) => {
   }, [mimeType])
 
   return (
-    <div className="dark:bg-polar-600 flex h-10 w-10 flex-shrink-0 flex-col items-center justify-center rounded-full bg-blue-50 text-blue-500 dark:text-white">
+    <div className="dark:bg-polar-700 flex h-10 w-10 shrink-0 flex-col items-center justify-center rounded-lg bg-white text-blue-500 dark:text-white">
       {icon}
     </div>
   )
@@ -67,10 +65,10 @@ const FileUploadProgress = ({ file }: { file: FileObject }) => {
   return (
     <>
       <div className="flex w-full items-center space-x-4">
-        <div className="flex-grow">
-          <div className="h-2 w-full rounded bg-gray-100">
+        <div className="grow">
+          <div className="dark:bg-polar-700 h-2 w-full rounded-sm bg-gray-200">
             <div
-              className="h-2 rounded bg-blue-400"
+              className="h-2 rounded-sm bg-blue-400"
               style={{ width: `${pct}%` }}
             >
               &nbsp;
@@ -262,7 +260,7 @@ export const FileListItem = ({
 
   const isUploading = useMemo(() => file.isUploading, [file])
 
-  let isEnabled = useMemo(() => {
+  const isEnabled = useMemo(() => {
     return archivedFiles ? !archivedFiles[file.id] : true
   }, [archivedFiles, file])
 
@@ -277,7 +275,7 @@ export const FileListItem = ({
     <div
       ref={sortable ? sortable.setNodeRef : undefined}
       className={twMerge(
-        'dark:hover:bg-polar-700 dark:text-polar-500 flex flex-row items-center justify-between gap-x-8 gap-y-2 rounded-xl px-4 py-2 text-gray-500 transition-colors hover:bg-gray-100',
+        'dark:bg-polar-800 dark:text-polar-500 mb-2 flex flex-row items-center justify-between gap-x-8 gap-y-2 rounded-xl bg-gray-100 p-3 text-gray-500 transition-colors',
         sortable?.isDragging && 'opacity-30',
       )}
       style={
@@ -298,7 +296,7 @@ export const FileListItem = ({
         >
           <FilePreview mimeType={file.mime_type} />
         </div>
-        <div className="flex w-full min-w-0 flex-grow flex-col gap-y-1 text-gray-950 dark:text-white">
+        <div className="flex w-full min-w-0 grow flex-col gap-y-1 text-gray-950 dark:text-white">
           <FilenameEditor
             name={file.name}
             className="text-sm font-medium"

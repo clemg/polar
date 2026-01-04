@@ -3,7 +3,7 @@ import { DataTableSearchParams, parseSearchParams } from '@/utils/datatable'
 import { getOrganizationBySlugOrNotFound } from '@/utils/organization'
 import { schemas } from '@polar-sh/client'
 import { Metadata } from 'next'
-import ClientPage from './ClientPage'
+import CustomFieldsPage from './CustomFieldsPage'
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -11,16 +11,17 @@ export async function generateMetadata(): Promise<Metadata> {
   }
 }
 
-export default async function Page({
-  params,
-  searchParams,
-}: {
-  params: { organization: string }
-  searchParams: DataTableSearchParams & {
-    type?: schemas['CustomFieldType']
-  }
+export default async function Page(props: {
+  params: Promise<{ organization: string }>
+  searchParams: Promise<
+    DataTableSearchParams & {
+      type?: schemas['CustomFieldType']
+    }
+  >
 }) {
-  const api = getServerSideAPI()
+  const searchParams = await props.searchParams
+  const params = await props.params
+  const api = await getServerSideAPI()
   const organization = await getOrganizationBySlugOrNotFound(
     api,
     params.organization,
@@ -31,7 +32,7 @@ export default async function Page({
   ])
 
   return (
-    <ClientPage
+    <CustomFieldsPage
       organization={organization}
       pagination={pagination}
       sorting={sorting}

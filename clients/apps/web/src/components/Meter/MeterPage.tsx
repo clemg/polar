@@ -22,10 +22,12 @@ import {
   TabsTrigger,
 } from '@polar-sh/ui/components/atoms/Tabs'
 import { endOfMonth, startOfMonth, subMonths } from 'date-fns'
-import { useContext, useMemo, useState } from 'react'
+import { useCallback, useContext, useMemo, useState } from 'react'
 import DateRangePicker from '../Metrics/DateRangePicker'
+import IntervalPicker, { getNextValidInterval } from '../Metrics/IntervalPicker'
 import MetricChart from '../Metrics/MetricChart'
 import { InlineModal } from '../Modal/InlineModal'
+import { Well, WellContent, WellHeader } from '../Shared/Well'
 import FormattedUnits from './FormattedUnits'
 import MeterCustomersTab from './MeterCustomersTab'
 import { MeterGetStarted } from './MeterGetStarted'
@@ -50,9 +52,23 @@ export const MeterPage = ({
     to: new Date(),
   })
 
-  const interval = useMemo(
-    () => dateRangeToInterval(dateRange.from, dateRange.to),
-    [dateRange],
+  const [interval, setInterval] = useState<schemas['TimeInterval']>(() =>
+    dateRangeToInterval(dateRange.from, dateRange.to),
+  )
+
+  const onDateChange = useCallback(
+    (newDateRange: { from: Date; to: Date }) => {
+      const validInterval = getNextValidInterval(
+        interval,
+        newDateRange.from,
+        newDateRange.to,
+      )
+      setDateRange(newDateRange)
+      if (validInterval !== interval) {
+        setInterval(validInterval)
+      }
+    },
+    [interval],
   )
 
   const { data: chartQuantities, isLoading: chartLoading } = useMeterQuantities(
@@ -61,6 +77,9 @@ export const MeterPage = ({
       start_timestamp: dateRange.from.toISOString(),
       end_timestamp: dateRange.to.toISOString(),
       interval,
+      // Aggregate by customer and then `sum` by default, as it's the most common use case
+      // See: https://github.com/polarsource/polar/issues/7032
+      customer_aggregation_function: 'sum',
     },
   )
 
@@ -80,40 +99,53 @@ export const MeterPage = ({
           <TabsTrigger value="customers">Customers</TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="flex flex-col gap-y-12 pb-12">
-          <div className="flex flex-col gap-y-6">
-            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <Well className="flex flex-col rounded-4xl p-2">
+            <WellHeader className="flex flex-col gap-4 px-4 pt-4 md:flex-row md:items-center md:justify-between">
               <h2 className="text-xl">Meter Quantities</h2>
-              <div className="w-full lg:w-auto">
+              <div className="flex flex-col gap-2 lg:flex-row">
+                <div>
+                  <IntervalPicker
+                    interval={interval}
+                    onChange={setInterval}
+                    startDate={dateRange.from}
+                    endDate={dateRange.to}
+                  />
+                </div>
                 <DateRangePicker
                   date={dateRange}
-                  onDateChange={setDateRange}
+                  onDateChange={onDateChange}
                   className="w-full"
                 />
               </div>
-            </div>
-            {chartLoading ? (
-              <div className="flex h-[300px] flex-col items-center justify-center">
-                <Spinner />
-              </div>
-            ) : chartQuantities ? (
-              <MetricChart
-                data={
-                  chartQuantities.quantities as unknown as ParsedMetricPeriod[]
-                }
-                interval={interval}
-                height={400}
-                metric={{
-                  slug: 'quantity',
-                  display_name: 'Quantity',
-                  type: 'scalar',
-                }}
-              />
-            ) : (
-              <div className="flex h-[300px] flex-col items-center justify-center">
-                <span className="text-lg">No data available</span>
-              </div>
-            )}
-          </div>
+            </WellHeader>
+            <WellContent className="dark:bg-polar-900 flex-col rounded-3xl bg-white p-4">
+              {chartLoading ? (
+                <div className="flex h-[300px] flex-col items-center justify-center">
+                  <Spinner />
+                </div>
+              ) : chartQuantities ? (
+                <MetricChart
+                  data={
+                    chartQuantities.quantities as unknown as ParsedMetricPeriod[]
+                  }
+                  interval={interval}
+                  height={400}
+                  metric={{
+                    slug: 'quantity',
+                    display_name: meter.name,
+                    type: 'scalar',
+                  }}
+                  chartType={
+                    meter.aggregation.func === 'count' ? 'bar' : 'line'
+                  }
+                />
+              ) : (
+                <div className="flex h-[300px] flex-col items-center justify-center">
+                  <span className="text-lg">No data available</span>
+                </div>
+              )}
+            </WellContent>
+          </Well>
           <div className="flex flex-col gap-y-6">
             <div className="flex flex-row items-center justify-between">
               <h2 className="text-xl">Activity</h2>
@@ -150,6 +182,7 @@ export const MeterPage = ({
             meter={meter}
             hide={hideEditMeterModal}
             hasProcessedEvents={meterEvents.length > 0}
+            organizationId={organization.id}
           />
         }
       />
@@ -176,12 +209,18 @@ const MeterActivityCards = ({ meter }: { meter: schemas['Meter'] }) => {
     start_timestamp: dates.lastMonthStart.toISOString(),
     end_timestamp: dates.currentMonthEnd.toISOString(),
     interval: 'month',
+    // Aggregate by customer and then `sum` by default, as it's the most common use case
+    // See: https://github.com/polarsource/polar/issues/7032
+    customer_aggregation_function: 'sum',
   })
 
   const { data: allTimeQuantities } = useMeterQuantities(meter.id, {
     start_timestamp: dates.allTimeStart.toISOString(),
     end_timestamp: dates.allTimeEnd.toISOString(),
     interval: 'month',
+    // Aggregate by customer and then `sum` by default, as it's the most common use case
+    // See: https://github.com/polarsource/polar/issues/7032
+    customer_aggregation_function: 'sum',
   })
 
   return (

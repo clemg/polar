@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import Depends, Path, Query
-from pydantic import UUID4
+from pydantic import UUID4, AwareDatetime
 
 from polar.exceptions import ResourceNotFound
 from polar.kit.pagination import ListResource, PaginationParamsQuery
@@ -18,7 +18,7 @@ from .schemas import WebhookEndpoint as WebhookEndpointSchema
 from .schemas import WebhookEndpointCreate, WebhookEndpointUpdate
 from .service import webhook as webhook_service
 
-router = APIRouter(prefix="/webhooks", tags=["webhooks", APITag.documented])
+router = APIRouter(prefix="/webhooks", tags=["webhooks", APITag.public])
 
 WebhookEndpointID = Annotated[UUID4, Path(description="The webhook endpoint ID.")]
 WebhookEndpointNotFound = {
@@ -111,6 +111,29 @@ async def update_webhook_endpoint(
     )
 
 
+@router.patch(
+    "/endpoints/{id}/secret",
+    response_model=WebhookEndpointSchema,
+    responses={
+        200: {"description": "Webhook endpoint secret reset."},
+        404: WebhookEndpointNotFound,
+    },
+)
+async def reset_webhook_endpoint_secret(
+    id: WebhookEndpointID,
+    auth_subject: WebhooksWrite,
+    session: AsyncSession = Depends(get_db_session),
+) -> WebhookEndpoint:
+    """
+    Regenerate a webhook endpoint secret.
+    """
+    endpoint = await webhook_service.get_endpoint(session, auth_subject, id)
+    if not endpoint:
+        raise ResourceNotFound()
+
+    return await webhook_service.reset_endpoint_secret(session, endpoint=endpoint)
+
+
 @router.delete(
     "/endpoints/{id}",
     status_code=204,
@@ -144,6 +167,12 @@ async def list_webhook_deliveries(
     endpoint_id: MultipleQueryFilter[UUID4] | None = Query(
         None, description="Filter by webhook endpoint ID."
     ),
+    start_timestamp: AwareDatetime | None = Query(
+        None, description="Filter deliveries after this timestamp."
+    ),
+    end_timestamp: AwareDatetime | None = Query(
+        None, description="Filter deliveries before this timestamp."
+    ),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListResource[WebhookDeliverySchema]:
     """
@@ -152,7 +181,12 @@ async def list_webhook_deliveries(
     Deliveries are all the attempts to deliver a webhook event to an endpoint.
     """
     results, count = await webhook_service.list_deliveries(
-        session, auth_subject, endpoint_id=endpoint_id, pagination=pagination
+        session,
+        auth_subject,
+        endpoint_id=endpoint_id,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+        pagination=pagination,
     )
 
     return ListResource.from_paginated_results(

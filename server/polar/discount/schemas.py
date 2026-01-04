@@ -2,7 +2,7 @@ import inspect
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 
-from annotated_types import Ge
+from annotated_types import Ge, Le
 from pydantic import (
     UUID4,
     AfterValidator,
@@ -56,7 +56,6 @@ Code = Annotated[
     EmptyStrToNone,
     AfterValidator(_code_validator),
     Field(
-        default=None,
         description=(
             "Code customers can use to apply the discount during checkout. "
             "Must be between 3 and 256 characters long and "
@@ -78,14 +77,12 @@ def _starts_at_ends_at_validator(
 StartsAt = Annotated[
     datetime | None,
     Field(
-        default=None,
         description="Optional timestamp after which the discount is redeemable.",
     ),
 ]
 EndsAt = Annotated[
     datetime | None,
     Field(
-        default=None,
         description=(
             "Optional timestamp after which the discount is no longer redeemable."
         ),
@@ -94,7 +91,6 @@ EndsAt = Annotated[
 MaxRedemptions = Annotated[
     int | None,
     Field(
-        default=None,
         description="Optional maximum number of times the discount can be redeemed.",
     ),
     Ge(1),
@@ -128,18 +124,19 @@ DurationInMonths = Annotated[
         """)
     ),
     Ge(1),
+    Le(999),
 ]
 Amount = Annotated[
     int,
     Field(
         description="Fixed amount to discount from the invoice total.",
         ge=0,
+        le=999999999999,
     ),
 ]
 Currency = Annotated[
     str,
     Field(
-        default="usd",
         pattern="usd",
         description="The currency. Currently, only `usd` is supported.",
     ),
@@ -168,11 +165,11 @@ ProductsList = Annotated[
 class DiscountCreateBase(MetadataInputMixin, Schema):
     name: Name
     type: DiscountType = Field(description="Type of the discount.")
-    code: Code
+    code: Code = None
 
-    starts_at: StartsAt
-    ends_at: EndsAt
-    max_redemptions: MaxRedemptions
+    starts_at: StartsAt = None
+    ends_at: EndsAt = None
+    max_redemptions: MaxRedemptions = None
 
     duration: DiscountDuration
 
@@ -204,7 +201,7 @@ class DiscountRepeatDurationCreateBase(Schema):
 class DiscountFixedCreateBase(Schema):
     type: Literal[DiscountType.fixed] = DiscountType.fixed
     amount: Amount
-    currency: Currency
+    currency: Currency = "usd"
 
 
 class DiscountPercentageCreateBase(Schema):
@@ -250,11 +247,11 @@ class DiscountUpdate(MetadataInputMixin, Schema):
     """
 
     name: Name | None = None
-    code: Code | None = None
+    code: Code = None
 
-    starts_at: StartsAt | None = None
-    ends_at: EndsAt | None = None
-    max_redemptions: MaxRedemptions | None = None
+    starts_at: StartsAt = None
+    ends_at: EndsAt = None
+    max_redemptions: MaxRedemptions = None
 
     duration: DiscountDuration | None = None
     duration_in_months: DurationInMonths | None = None
@@ -329,13 +326,20 @@ class DiscountRepeatDurationBase(Schema):
 
 class DiscountFixedBase(Schema):
     type: Literal[DiscountType.fixed] = DiscountType.fixed
-    amount: int
-    currency: str
+    amount: int = Field(examples=[1000])
+    currency: str = Field(examples=["usd"])
 
 
 class DiscountPercentageBase(Schema):
     type: Literal[DiscountType.percentage] = DiscountType.percentage
-    basis_points: int
+    basis_points: int = Field(
+        examples=[1000],
+        description=(
+            "Discount percentage in basis points. "
+            "A basis point is 1/100th of a percent. "
+            "For example, 1000 basis points equals a 10% discount."
+        ),
+    )
 
 
 class DiscountFixedOnceForeverDurationBase(

@@ -4,11 +4,17 @@ import math
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
+from polar.enums import PaymentProcessor
+from polar.integrations.stripe.service import stripe as stripe_service
+from polar.kit.math import polar_round
 from polar.models import Refund, Transaction
 from polar.models.refund import RefundStatus
 from polar.models.transaction import TransactionType
 from polar.postgres import AsyncSession
-from polar.transaction.repository import RefundTransactionRepository
+from polar.transaction.repository import (
+    PaymentTransactionRepository,
+    RefundTransactionRepository,
+)
 
 from .balance import balance_transaction as balance_transaction_service
 from .base import BaseTransactionService, BaseTransactionServiceError
@@ -45,35 +51,50 @@ class RefundTransactionDoesNotExistError(RefundTransactionError):
 
 
 class RefundTransactionService(BaseTransactionService):
-    async def create(
-        self,
-        session: AsyncSession,
-        *,
-        charge_id: str,
-        payment_transaction: Transaction,
-        refund: Refund,
-    ) -> Transaction:
+    async def create(self, session: AsyncSession, refund: Refund) -> Transaction:
         if not refund.succeeded:
             raise NotSucceededRefundError(refund)
 
         repository = RefundTransactionRepository.from_session(session)
-        if await repository.get_by_refund_id(refund.processor_id) is not None:
+        if await repository.get_by_refund_id(refund.id) is not None:
             raise RefundTransactionAlreadyExistsError(refund)
+
+        if refund.processor == PaymentProcessor.stripe:
+            assert refund.processor_balance_transaction_id is not None
+            balance_transaction = await stripe_service.get_balance_transaction(
+                refund.processor_balance_transaction_id
+            )
+            settlement_amount = balance_transaction.amount
+            settlement_currency = balance_transaction.currency
+            exchange_rate = -settlement_amount / (refund.amount + refund.tax_amount)
+            settlement_tax_amount = -polar_round(refund.tax_amount * exchange_rate)
+        else:
+            raise NotImplementedError()
+
+        payment_transaction_repository = PaymentTransactionRepository.from_session(
+            session
+        )
+        payment_transaction = await payment_transaction_repository.get_by_payment_id(
+            refund.payment_id
+        )
+        assert payment_transaction is not None
 
         refund_transaction = Transaction(
             type=TransactionType.refund,
             processor=refund.processor,
-            currency=refund.currency,
-            amount=-refund.amount,
-            account_currency=refund.currency,
-            account_amount=-refund.amount,
-            tax_amount=-refund.tax_amount,
+            currency=settlement_currency,
+            amount=settlement_amount - settlement_tax_amount,
+            account_currency=settlement_currency,
+            account_amount=settlement_amount - settlement_tax_amount,
+            tax_amount=settlement_tax_amount,
             tax_country=payment_transaction.tax_country,
             tax_state=payment_transaction.tax_state,
+            presentment_currency=refund.currency,
+            presentment_amount=-refund.amount,
+            presentment_tax_amount=-refund.tax_amount,
+            refund=refund,
             customer_id=payment_transaction.customer_id,
-            charge_id=charge_id,
-            refund_id=refund.processor_id,
-            polar_refund_id=refund.id,
+            charge_id=payment_transaction.charge_id,
             payment_customer_id=payment_transaction.payment_customer_id,
             payment_organization_id=payment_transaction.payment_organization_id,
             payment_user_id=payment_transaction.payment_user_id,
@@ -93,40 +114,47 @@ class RefundTransactionService(BaseTransactionService):
         await self._create_reversal_balances(
             session,
             payment_transaction=payment_transaction,
-            refund_amount=refund.amount,
+            refund_amount=settlement_amount - settlement_tax_amount,
         )
         return refund_transaction
 
-    async def revert(
-        self,
-        session: AsyncSession,
-        *,
-        charge_id: str,
-        payment_transaction: Transaction,
-        refund: Refund,
-    ) -> Transaction:
+    async def revert(self, session: AsyncSession, refund: Refund) -> Transaction:
         if refund.status not in {RefundStatus.canceled, RefundStatus.failed}:
             raise NotCanceledRefundError(refund)
 
         repository = RefundTransactionRepository.from_session(session)
-        refund_transaction = await repository.get_by_refund_id(refund.processor_id)
+        refund_transaction = await repository.get_by_refund_id(refund.id)
         if refund_transaction is None:
             raise RefundTransactionDoesNotExistError(refund)
+
+        payment_transaction_repository = PaymentTransactionRepository.from_session(
+            session
+        )
+        payment_transaction = await payment_transaction_repository.get_by_payment_id(
+            refund.payment_id
+        )
+        assert payment_transaction is not None
 
         refund_reversal_transaction = Transaction(
             type=TransactionType.refund_reversal,
             processor=refund.processor,
-            currency=refund.currency,
-            amount=refund.amount,
+            currency=refund_transaction.currency,
+            amount=-refund_transaction.amount,
             account_currency=refund.currency,
-            account_amount=refund.amount,
-            tax_amount=refund.tax_amount,
+            account_amount=-refund_transaction.amount,
+            tax_amount=-refund_transaction.tax_amount,
             tax_country=payment_transaction.tax_country,
             tax_state=payment_transaction.tax_state,
+            presentment_currency=refund_transaction.presentment_currency,
+            presentment_amount=-refund_transaction.presentment_amount
+            if refund_transaction.presentment_amount is not None
+            else None,
+            presentment_tax_amount=-refund_transaction.presentment_tax_amount
+            if refund_transaction.presentment_tax_amount is not None
+            else None,
             customer_id=payment_transaction.customer_id,
-            charge_id=charge_id,
-            refund_id=refund.processor_id,
-            polar_refund_id=refund.id,
+            charge_id=payment_transaction.charge_id,
+            refund=refund,
             payment_customer_id=payment_transaction.payment_customer_id,
             payment_organization_id=payment_transaction.payment_organization_id,
             payment_user_id=payment_transaction.payment_user_id,
@@ -140,7 +168,7 @@ class RefundTransactionService(BaseTransactionService):
         await self._create_revert_reversal_balances(
             session,
             payment_transaction=payment_transaction,
-            refund_amount=refund.amount,
+            refund_amount=-refund_transaction.amount,
         )
         return refund_reversal_transaction
 

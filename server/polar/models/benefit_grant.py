@@ -27,7 +27,7 @@ from polar.kit.db.models import RecordModel
 
 if TYPE_CHECKING:
     from polar.benefit.strategies import BenefitGrantProperties
-    from polar.models import Benefit, Customer, Order, Subscription
+    from polar.models import Benefit, Customer, Member, Order, Subscription
 
 
 class BenefitGrantError(TypedDict):
@@ -76,13 +76,23 @@ class BenefitGrantScopeComparator(CompositeProperty.Comparator[BenefitGrantScope
 
 
 class BenefitGrant(RecordModel):
+    """
+    Represents a benefit granted to a customer or member.
+
+    Unique constraints:
+    - benefit_grants_sbc_key: Ensures one grant per (subscription, customer, benefit)
+    - benefit_grants_smb_key: Ensures one grant per (subscription, member, benefit)
+
+    These constraints allow both customer-level and member-level benefit grants.
+    """
+
     __tablename__ = "benefit_grants"
     __table_args__ = (
         UniqueConstraint(
             "subscription_id",
-            "customer_id",
+            "member_id",
             "benefit_id",
-            name="benefit_grants_sbc_key",
+            name="benefit_grants_smb_key",
         ),
     )
 
@@ -100,6 +110,17 @@ class BenefitGrant(RecordModel):
     @declared_attr
     def customer(cls) -> Mapped["Customer"]:
         return relationship("Customer", lazy="raise")
+
+    member_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("members.id", ondelete="cascade"),
+        nullable=True,
+        index=True,
+    )
+
+    @declared_attr
+    def member(cls) -> Mapped["Member | None"]:
+        return relationship("Member", lazy="raise")
 
     benefit_id: Mapped[UUID] = mapped_column(
         Uuid,
@@ -179,6 +200,7 @@ class BenefitGrant(RecordModel):
 
     def set_grant_failed(self, error: Exception) -> None:
         self.granted_at = None
+        self.revoked_at = None
         self.error = BenefitGrantError(
             message=str(error),
             type=error.__class__.__name__,

@@ -1,4 +1,4 @@
-import { Close } from '@mui/icons-material'
+import Close from '@mui/icons-material/Close'
 import { schemas } from '@polar-sh/client'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import QRCode from 'qrcode'
@@ -26,7 +26,7 @@ export const CheckoutLinkQRCodeModal = ({
         variant="ghost"
         size="icon"
         onClick={hide}
-        className="absolute right-6 top-6"
+        className="absolute top-6 right-6"
       >
         <Close />
       </Button>

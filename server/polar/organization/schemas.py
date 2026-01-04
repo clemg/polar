@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -6,7 +5,7 @@ from typing import Annotated, Any, Literal
 from pydantic import (
     UUID4,
     AfterValidator,
-    EmailStr,
+    BeforeValidator,
     Field,
     StringConstraints,
     model_validator,
@@ -15,7 +14,7 @@ from pydantic.json_schema import SkipJsonSchema
 from pydantic.networks import HttpUrl
 
 from polar.config import settings
-from polar.currency.schemas import CurrencyAmount
+from polar.enums import SubscriptionProrationBehavior
 from polar.kit.email import EmailStrDNS
 from polar.kit.schemas import (
     ORGANIZATION_ID_EXAMPLE,
@@ -29,9 +28,13 @@ from polar.kit.schemas import (
     TimestampedSchema,
 )
 from polar.models.organization import (
+    OrganizationCustomerEmailSettings,
+    OrganizationCustomerPortalSettings,
     OrganizationNotificationSettings,
+    OrganizationStatus,
     OrganizationSubscriptionSettings,
 )
+from polar.models.organization_review import OrganizationReview
 
 OrganizationID = Annotated[
     UUID4,
@@ -40,10 +43,47 @@ OrganizationID = Annotated[
     Field(examples=[ORGANIZATION_ID_EXAMPLE]),
 ]
 
+NameInput = Annotated[str, StringConstraints(min_length=3)]
+
+
+def validate_reserved_keywords(value: str) -> str:
+    if value in settings.ORGANIZATION_SLUG_RESERVED_KEYWORDS:
+        raise ValueError("This slug is reserved.")
+    return value
+
+
+SlugInput = Annotated[
+    str,
+    StringConstraints(to_lower=True, min_length=3),
+    SlugValidator,
+    AfterValidator(validate_reserved_keywords),
+]
+
+
+def _discard_logo_dev_url(url: HttpUrl) -> HttpUrl | None:
+    if url.host and url.host.endswith("logo.dev"):
+        return None
+    return url
+
+
+AvatarUrl = Annotated[HttpUrlToStr, AfterValidator(_discard_logo_dev_url)]
+
 
 class OrganizationFeatureSettings(Schema):
     issue_funding_enabled: bool = Field(
         False, description="If this organization has issue funding enabled"
+    )
+    seat_based_pricing_enabled: bool = Field(
+        False, description="If this organization has seat-based pricing enabled"
+    )
+    revops_enabled: bool = Field(
+        False, description="If this organization has RevOps enabled"
+    )
+    wallets_enabled: bool = Field(
+        False, description="If this organization has Wallets enabled"
+    )
+    member_model_enabled: bool = Field(
+        False, description="If this organization has the Member model enabled"
     )
 
 
@@ -69,14 +109,14 @@ class OrganizationDetails(Schema):
         ..., description="Main customer acquisition channels."
     )
     future_annual_revenue: int = Field(
-        ..., description="Estimated revenue in the next 12 months"
+        ..., ge=0, description="Estimated revenue in the next 12 months"
     )
     switching: bool = Field(True, description="Switching from another platform?")
     switching_from: (
         Literal["paddle", "lemon_squeezy", "gumroad", "stripe", "other"] | None
     ) = Field(None, description="Which platform the organization is migrating from.")
     previous_annual_revenue: int = Field(
-        0, description="Revenue from last year if applicable."
+        0, ge=0, description="Revenue from last year if applicable."
     )
 
 
@@ -161,9 +201,7 @@ class OrganizationProfileSettings(Schema):
     )
 
 
-# Public API
-class Organization(IDSchema, TimestampedSchema):
-    id: OrganizationID
+class OrganizationBase(IDSchema, TimestampedSchema):
     name: str = Field(
         description="Organization name shown in checkout, customer portal, emails etc.",
     )
@@ -173,24 +211,11 @@ class Organization(IDSchema, TimestampedSchema):
     avatar_url: str | None = Field(
         description="Avatar URL shown in checkout, customer portal, emails etc."
     )
-
-    email: str | None = Field(description="Public support email.")
-    website: str | None = Field(description="Official website of the organization.")
-    socials: list[OrganizationSocialLink] = Field(
-        description="Links to social profiles.",
+    proration_behavior: SubscriptionProrationBehavior = Field(
+        description="Proration behavior applied when customer updates their subscription from the portal.",
     )
-    details_submitted_at: datetime | None = Field(
-        description="When the business details were submitted.",
-    )
-
-    feature_settings: OrganizationFeatureSettings | None = Field(
-        description="Organization feature settings",
-    )
-    subscription_settings: OrganizationSubscriptionSettings = Field(
-        description="Settings related to subscriptions management",
-    )
-    notification_settings: OrganizationNotificationSettings = Field(
-        description="Settings related to notifications",
+    allow_customer_updates: bool = Field(
+        description="Whether customers can update their subscriptions from the customer portal.",
     )
 
     # Deprecated attributes
@@ -222,22 +247,88 @@ class Organization(IDSchema, TimestampedSchema):
     )
 
 
-def validate_reserved_keywords(value: str) -> str:
-    if value in settings.ORGANIZATION_SLUG_RESERVED_KEYWORDS:
-        raise ValueError("This slug is reserved.")
-    return value
+class LegacyOrganizationStatus(StrEnum):
+    """
+    Legacy organization status values kept for backward compatibility in schemas
+    using OrganizationPublicBase.
+    """
+
+    CREATED = "created"
+    ONBOARDING_STARTED = "onboarding_started"
+    UNDER_REVIEW = "under_review"
+    DENIED = "denied"
+    ACTIVE = "active"
+
+    @classmethod
+    def from_status(cls, status: OrganizationStatus) -> "LegacyOrganizationStatus":
+        mapping = {
+            OrganizationStatus.CREATED: LegacyOrganizationStatus.CREATED,
+            OrganizationStatus.ONBOARDING_STARTED: (
+                LegacyOrganizationStatus.ONBOARDING_STARTED
+            ),
+            OrganizationStatus.INITIAL_REVIEW: LegacyOrganizationStatus.UNDER_REVIEW,
+            OrganizationStatus.ONGOING_REVIEW: LegacyOrganizationStatus.UNDER_REVIEW,
+            OrganizationStatus.DENIED: LegacyOrganizationStatus.DENIED,
+            OrganizationStatus.ACTIVE: LegacyOrganizationStatus.ACTIVE,
+        }
+        try:
+            return mapping[status]
+        except KeyError as e:
+            raise ValueError("Unknown OrganizationStatus") from e
+
+
+class OrganizationPublicBase(OrganizationBase):
+    # Attributes that we used to have publicly, but now want to hide from
+    # the public schema.
+    # Keep it for now for backward compatibility in the SDK
+    email: SkipJsonSchema[str | None]
+    website: SkipJsonSchema[str | None]
+    socials: SkipJsonSchema[list[OrganizationSocialLink]]
+    status: Annotated[
+        SkipJsonSchema[LegacyOrganizationStatus],
+        BeforeValidator(LegacyOrganizationStatus.from_status),
+    ]
+    details_submitted_at: SkipJsonSchema[datetime | None]
+
+    feature_settings: SkipJsonSchema[OrganizationFeatureSettings | None]
+    subscription_settings: SkipJsonSchema[OrganizationSubscriptionSettings]
+    notification_settings: SkipJsonSchema[OrganizationNotificationSettings]
+    customer_email_settings: SkipJsonSchema[OrganizationCustomerEmailSettings]
+
+
+class Organization(OrganizationBase):
+    email: str | None = Field(description="Public support email.")
+    website: str | None = Field(description="Official website of the organization.")
+    socials: list[OrganizationSocialLink] = Field(
+        description="Links to social profiles.",
+    )
+    status: OrganizationStatus = Field(description="Current organization status")
+    details_submitted_at: datetime | None = Field(
+        description="When the business details were submitted.",
+    )
+
+    feature_settings: OrganizationFeatureSettings | None = Field(
+        description="Organization feature settings",
+    )
+    subscription_settings: OrganizationSubscriptionSettings = Field(
+        description="Settings related to subscriptions management",
+    )
+    notification_settings: OrganizationNotificationSettings = Field(
+        description="Settings related to notifications",
+    )
+    customer_email_settings: OrganizationCustomerEmailSettings = Field(
+        description="Settings related to customer emails",
+    )
+    customer_portal_settings: OrganizationCustomerPortalSettings = Field(
+        description="Settings related to the customer portal",
+    )
 
 
 class OrganizationCreate(Schema):
-    name: Annotated[str, StringConstraints(min_length=3)]
-    slug: Annotated[
-        str,
-        StringConstraints(to_lower=True, min_length=3),
-        SlugValidator,
-        AfterValidator(validate_reserved_keywords),
-    ]
-    avatar_url: HttpUrlToStr | None = None
-    email: EmailStr | None = Field(None, description="Public support email.")
+    name: NameInput
+    slug: SlugInput
+    avatar_url: AvatarUrl | None = None
+    email: EmailStrDNS | None = Field(None, description="Public support email.")
     website: HttpUrlToStr | None = Field(
         None, description="Official website of the organization."
     )
@@ -252,13 +343,13 @@ class OrganizationCreate(Schema):
     feature_settings: OrganizationFeatureSettings | None = None
     subscription_settings: OrganizationSubscriptionSettings | None = None
     notification_settings: OrganizationNotificationSettings | None = None
+    customer_email_settings: OrganizationCustomerEmailSettings | None = None
+    customer_portal_settings: OrganizationCustomerPortalSettings | None = None
 
 
 class OrganizationUpdate(Schema):
-    name: Annotated[
-        str | None, StringConstraints(min_length=3), EmptyStrToNoneValidator
-    ] = None
-    avatar_url: HttpUrlToStr | None = None
+    name: NameInput | None = None
+    avatar_url: AvatarUrl | None = None
 
     email: EmailStrDNS | None = Field(None, description="Public support email.")
     website: HttpUrlToStr | None = Field(
@@ -275,55 +366,78 @@ class OrganizationUpdate(Schema):
     feature_settings: OrganizationFeatureSettings | None = None
     subscription_settings: OrganizationSubscriptionSettings | None = None
     notification_settings: OrganizationNotificationSettings | None = None
+    customer_email_settings: OrganizationCustomerEmailSettings | None = None
+    customer_portal_settings: OrganizationCustomerPortalSettings | None = None
 
 
-class OrganizationSetAccount(Schema):
-    account_id: UUID4
+class OrganizationPaymentStep(Schema):
+    id: str = Field(description="Step identifier")
+    title: str = Field(description="Step title")
+    description: str = Field(description="Step description")
+    completed: bool = Field(description="Whether the step is completed")
 
 
-class OrganizationStripePortalSession(Schema):
-    url: str
-
-
-class CreditBalance(Schema):
-    amount: CurrencyAmount = Field(
-        description="The customers credit balance. A negative value means that Polar owes this customer money (credit), a positive number means that the customer owes Polar money (debit)."
+class OrganizationPaymentStatus(Schema):
+    payment_ready: bool = Field(
+        description="Whether the organization is ready to accept payments"
+    )
+    steps: list[OrganizationPaymentStep] = Field(description="List of onboarding steps")
+    organization_status: OrganizationStatus = Field(
+        description="Current organization status"
     )
 
 
-# Internal model
-class RepositoryBadgeSettingsUpdate(Schema):
-    id: UUID4
-    badge_auto_embed: bool
-    retroactive: bool
+class OrganizationAppealRequest(Schema):
+    reason: Annotated[
+        str,
+        StringConstraints(min_length=50, max_length=5000),
+        Field(
+            description="Detailed explanation of why this organization should be approved. Minimum 50 characters."
+        ),
+    ]
 
 
-# Internal model
-class RepositoryBadgeSettingsRead(Schema):
-    id: UUID4
-    avatar_url: str | None
-    name: str
-    synced_issues: int
-    open_issues: int
-    auto_embedded_issues: int
-    label_embedded_issues: int
-    badge_auto_embed: bool
-    badge_label: str
-    is_private: bool
-    is_sync_completed: bool
+class OrganizationAppealResponse(Schema):
+    success: bool = Field(description="Whether the appeal was successfully submitted")
+    message: str = Field(description="Success or error message")
+    appeal_submitted_at: datetime = Field(description="When the appeal was submitted")
 
 
-# Internal model
-class OrganizationBadgeSettingsUpdate(Schema):
-    show_amount: bool
-    minimum_amount: int
-    message: str
-    repositories: Sequence[RepositoryBadgeSettingsUpdate]
+class OrganizationReviewStatus(Schema):
+    verdict: Literal["PASS", "FAIL", "UNCERTAIN"] | None = Field(
+        default=None, description="AI validation verdict"
+    )
+    reason: str | None = Field(default=None, description="Reason for the verdict")
+    appeal_submitted_at: datetime | None = Field(
+        default=None, description="When appeal was submitted"
+    )
+    appeal_reason: str | None = Field(default=None, description="Reason for the appeal")
+    appeal_decision: OrganizationReview.AppealDecision | None = Field(
+        default=None, description="Decision on the appeal (approved/rejected)"
+    )
+    appeal_reviewed_at: datetime | None = Field(
+        default=None, description="When appeal was reviewed"
+    )
 
 
-# Internal model
-class OrganizationBadgeSettingsRead(Schema):
-    show_amount: bool
-    minimum_amount: int
-    message: str | None
-    repositories: Sequence[RepositoryBadgeSettingsRead]
+class OrganizationDeletionBlockedReason(StrEnum):
+    """Reasons why an organization cannot be immediately deleted."""
+
+    HAS_ORDERS = "has_orders"
+    HAS_ACTIVE_SUBSCRIPTIONS = "has_active_subscriptions"
+    STRIPE_ACCOUNT_DELETION_FAILED = "stripe_account_deletion_failed"
+
+
+class OrganizationDeletionResponse(Schema):
+    """Response for organization deletion request."""
+
+    deleted: bool = Field(
+        description="Whether the organization was immediately deleted"
+    )
+    requires_support: bool = Field(
+        description="Whether a support ticket was created for manual handling"
+    )
+    blocked_reasons: list[OrganizationDeletionBlockedReason] = Field(
+        default_factory=list,
+        description="Reasons why immediate deletion is blocked",
+    )

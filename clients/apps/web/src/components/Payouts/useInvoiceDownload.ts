@@ -1,6 +1,6 @@
 import { useOrganizationSSE } from '@/hooks/sse'
 import { setValidationErrors } from '@/utils/api/errors'
-import { queryClient } from '@/utils/api/query'
+import { getQueryClient } from '@/utils/api/query'
 import { api } from '@/utils/client'
 import { isValidationError, type schemas } from '@polar-sh/client'
 import { useCallback, useEffect, useState } from 'react'
@@ -27,6 +27,9 @@ export const useInvoiceDownload = ({
     defaultValues: {
       ...account,
       invoice_number: payout?.invoice_number || '',
+      billing_address: account.billing_address as
+        | schemas['AddressInput']
+        | null,
     },
   })
 
@@ -39,6 +42,9 @@ export const useInvoiceDownload = ({
       form.reset({
         ...account,
         invoice_number: payout.invoice_number || '',
+        billing_address: account.billing_address as
+          | schemas['AddressInput']
+          | null,
       })
     }
   }, [payout, account, form])
@@ -93,7 +99,7 @@ export const useInvoiceDownload = ({
         return
       }
 
-      await queryClient.invalidateQueries({
+      await getQueryClient().invalidateQueries({
         queryKey: ['organizations', 'account'],
       })
 

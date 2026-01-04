@@ -8,14 +8,15 @@ from polar.kit.db.postgres import AsyncSession
 from polar.kit.pagination import ListResource, PaginationParamsQuery
 from polar.kit.schemas import MultipleQueryFilter
 from polar.kit.sorting import Sorting, SortingGetter
+from polar.locker import Locker, get_locker
 from polar.models import Subscription
 from polar.openapi import APITag
-from polar.organization.schemas import OrganizationID
 from polar.postgres import get_db_session
 from polar.product.schemas import ProductID
 from polar.routing import APIRouter
-from polar.subscription.schemas import SubscriptionID
+from polar.subscription.schemas import SubscriptionChargePreview, SubscriptionID
 from polar.subscription.service import AlreadyCanceledSubscription
+from polar.subscription.service import subscription as subscription_service
 
 from .. import auth
 from ..schemas.subscription import CustomerSubscription, CustomerSubscriptionUpdate
@@ -26,9 +27,7 @@ from ..service.subscription import (
 
 log = structlog.get_logger()
 
-router = APIRouter(
-    prefix="/subscriptions", tags=["subscriptions", APITag.documented, APITag.featured]
-)
+router = APIRouter(prefix="/subscriptions", tags=["subscriptions", APITag.public])
 
 SubscriptionNotFound = {
     "description": "Customer subscription was not found.",
@@ -48,9 +47,6 @@ async def list(
     auth_subject: auth.CustomerPortalRead,
     pagination: PaginationParamsQuery,
     sorting: ListSorting,
-    organization_id: MultipleQueryFilter[OrganizationID] | None = Query(
-        None, title="OrganizationID Filter", description="Filter by organization ID."
-    ),
     product_id: MultipleQueryFilter[ProductID] | None = Query(
         None, title="ProductID Filter", description="Filter by product ID."
     ),
@@ -67,7 +63,6 @@ async def list(
     results, count = await customer_subscription_service.list(
         session,
         auth_subject,
-        organization_id=organization_id,
         product_id=product_id,
         active=active,
         query=query,
@@ -104,6 +99,39 @@ async def get(
     return subscription
 
 
+@router.get(
+    "/{id}/charge-preview",
+    summary="Preview Next Charge For Active Subscription",
+    response_model=SubscriptionChargePreview,
+    responses={404: SubscriptionNotFound},
+    tags=[APITag.private],
+)
+async def get_charge_preview(
+    id: SubscriptionID,
+    auth_subject: auth.CustomerPortalRead,
+    session: AsyncSession = Depends(get_db_session),
+) -> SubscriptionChargePreview:
+    """Get current period usage and cost breakdown for a subscription."""
+    subscription = await customer_subscription_service.get_by_id(
+        session, auth_subject, id
+    )
+
+    if subscription is None:
+        raise ResourceNotFound()
+
+    # Allow active, trialing, and subscriptions set to cancel at period end
+    if subscription.status not in ("active", "trialing"):
+        raise ResourceNotFound()
+
+    # If subscription will end (cancel_at_period_end or ends_at), ensure there's still a charge coming
+    if subscription.cancel_at_period_end or subscription.ends_at:
+        # Only show preview if we haven't reached the end date yet
+        if subscription.ended_at:
+            raise ResourceNotFound()
+
+    return await subscription_service.calculate_charge_preview(session, subscription)
+
+
 @router.patch(
     "/{id}",
     summary="Update Subscription",
@@ -125,6 +153,7 @@ async def update(
     subscription_update: CustomerSubscriptionUpdate,
     auth_subject: auth.CustomerPortalWrite,
     session: AsyncSession = Depends(get_db_session),
+    locker: Locker = Depends(get_locker),
 ) -> Subscription:
     """Update a subscription of the authenticated customer."""
     subscription = await customer_subscription_service.get_by_id(
@@ -140,9 +169,10 @@ async def update(
         customer_id=auth_subject.subject.id,
         updates=subscription_update,
     )
-    return await customer_subscription_service.update(
-        session, subscription, updates=subscription_update
-    )
+    async with subscription_service.lock(locker, subscription):
+        return await customer_subscription_service.update(
+            session, subscription, updates=subscription_update
+        )
 
 
 @router.delete(
@@ -165,6 +195,7 @@ async def cancel(
     id: SubscriptionID,
     auth_subject: auth.CustomerPortalWrite,
     session: AsyncSession = Depends(get_db_session),
+    locker: Locker = Depends(get_locker),
 ) -> Subscription:
     """Cancel a subscription of the authenticated customer."""
     subscription = await customer_subscription_service.get_by_id(
@@ -179,4 +210,5 @@ async def cancel(
         id=id,
         customer_id=auth_subject.subject.id,
     )
-    return await customer_subscription_service.cancel(session, subscription)
+    async with subscription_service.lock(locker, subscription):
+        return await customer_subscription_service.cancel(session, subscription)

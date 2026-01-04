@@ -1,7 +1,145 @@
 ---
+rss: true
 title: Product Updates
 description: Stay up to date with the latest changes and improvements to Polar.
 ---
+
+<Update label="2025-10-17">
+  ## Ability to update subscription to an updated price of the product
+
+  Merchants can now [update existing subscriptions](https://polar.sh/docs/api-reference/subscriptions/update#subscriptionupdateproduct) from archived pricing schemes to current ones within the same product.
+  - Enables migration from grandfathered pricing to current pricing schemes
+  - Prorations calculated using active subscription prices
+  - In the dashboard, a small badge **Upgrade pricing** will indicate that you can update to the same product, but with the new pricing scheme.
+  <img class="rounded" src="/assets/changelog/2025-10-17/update-subscription.png" />
+
+  ## New IP ranges
+
+  From **October 27th, 2025**, [new IP ranges](https://polar.sh/docs/integrate/webhooks/delivery#ip-allowlist) will be added.
+
+  ## Improved Subscription Cancellation Flow
+
+  [Benefits](https://polar.sh/docs/features/benefits/introduction) attached to the subscription [are now automatically revoked](https://github.com/polarsource/polar/pull/7271) when the subscription is canceled.
+
+  ## Ability to specify External ID
+
+  [External ID can now be specified](https://github.com/polarsource/polar/pull/7275) during creation of a customer via the dashboard.
+  <img class="border rounded" src="/assets/changelog/2025-10-17/create-customer.png" />
+
+  ## Ability to set Return URL for Checkouts and Customer Portal
+
+  A Return URL can now be set while generating a [checkout session](https://polar.sh/docs/api-reference/checkouts/create-session#body-return-url-one-of-0) or a [customer portal session](https://polar.sh/docs/api-reference/customer-portal/sessions/create#body-one-of-0-return-url-one-of-0). This allows you to preserve the context for the end users who visit either if they wish to go back to the application.
+
+  ## Ability to search Customers via their External ID
+
+  The [List Customers API](https://polar.sh/docs/api-reference/customers/list) now accepts Customer's External ID [in the **query** parameter](https://polar.sh/docs/api-reference/customers/list#parameter-one-of-0).
+
+  ## Ability to disable automatic customer emails
+
+  Via the organization settings, you can now disable the emails we automatically send to customers on certain events. This gives you the ability to own the communications with the customers.
+
+  <img class="border rounded" src="/assets/changelog/2025-10-17/email-settings.png" />
+</Update>
+
+<Update label="2025-10-10">
+
+  ## Launched In-Product Chat Support for Merchants
+
+<img src="/assets/changelog/2025-10-10/launched-merchant-support.jpg" />
+
+We're excited to introduce a chat widget to the Polar dashboard, making it easier than ever for merchants to get help directly within the product.
+
+  ## Improved Checkout Flow for Invalid Discount Code
+
+Previously, if you entered an invalid discount code during checkout, you couldn't continue even after removing the code. Now, clearing the discount input lets you proceed smoothly with the checkout process.
+
+  ## Improved Customer Portal Rate Limits
+
+We've made several improvements to the Customer Portal to handle authentication rate limits more gracefully:
+
+- The portal now clearly shows 401 and 429 errors on the OTP (one-time password) page.
+- If you hit a 429 (too many requests), you'll be redirected to a clear `/too-many-requests` page.
+
+</Update>
+
+<Update label="2025-10-01">
+
+  ## Launched Subscription Trials
+
+You can now offer [trial periods](/docs/features/trials) for new subscriptions! This highly requested feature allows you to let customers experience your product before their first payment is due. Trials can be configured in both the dashboard and API when creating or updating subscription products.
+
+  ## Always display taxes line item in the checkout
+
+We've improved our checkout experience to always display taxes (vs lazy loading them on country selection), making charges more transparent for your customers regardless of whether taxes apply to their purchase.
+
+  ## Do not calculate taxes on free or zero-amount orders
+
+Orders with a zero amount (such as promotional products) will no longer have taxes calculated, resulting in a clearer and more accurate order summary for your customers.
+
+  ## Add confirmation modal for deleting discounts
+
+When deleting a discount, you'll now see a confirmation modal to help prevent accidental deletions and provide extra clarity on the impact of your actions.
+
+  ## Fix infinite rendering loop with date picker
+
+Resolved a bug where selecting dates in the date picker could cause an infinite rendering loop, improving reliability for date-related forms.
+
+  ## Require opt-in if you will be charged immediately
+
+Users must now explicitly confirm immediate charges or credits when switching subscription intervals, with the UI providing clearer, contextual explanations of invoicing outcomes.
+
+  ## Check for `expires_at` when activating license keys
+
+License key activation now correctly checks the `expires_at` date, ensuring that only valid, non-expired license keys can be activated.
+
+  ## Fix customer state for trialing subscriptions
+
+The [Customer State API](/docs/api-reference/customers/state) now properly handles customers with `trialing` subscriptions, so your integrations and dashboards always show an accurate subscription status.
+
+</Update>
+
+<Update label="2025-09-22">
+  ## Improved preview of next invoice in Customer Portal
+
+We've enhanced the Customer Portal to provide a clearer and more accurate preview of your next invoice. The overview now updates automatically after subscription changes, and you can preview upcoming charges with all relevant taxes and discounts included.
+
+  ## Cancellation metrics
+
+<img src="/assets/changelog/2025-09-22/cancellation-metrics-example.png" />
+
+We've added detailed cancellation metrics, giving you clearer insights into subscription cancellations and their impact on your business performance.
+
+</Update>
+
+<Update label="2025-09-12">
+  ## Webhooks payload now includes timestamp
+
+We've updated our webhooks server implementation to [include a timestamp in each payload](https://github.com/polarsource/polar/pull/6770), in line with the Standard Webhooks specification.
+
+This change ensures that every webhook payload contains precise event timing, making it easier to trace and debug webhook deliveries, and to meet integration requirements for external platforms.
+
+</Update>
+
+<Update label="2025-09-05">
+  ## Meter management improvements
+
+We've made it easier to manage your meters with new UI functionality for archiving and unarchiving meters directly from the dashboard.
+
+You can now archive meters that are no longer needed, which helps keep your meter list organized. Archived meters can be unarchived if you need to use them again. Note that meters cannot be archived if they are still attached to active products or referenced by active benefits.
+
+  ## Metrics accuracy improvements
+
+We've improved the accuracy of our metrics by excluding unpaid orders from all calculations. Previously, orders in pending status were included in metrics, which could lead to inflated numbers.
+
+Now, only successfully paid and refunded orders are included in metrics calculations, giving you a more accurate view of your actual business performance.
+
+  ## Enhanced customer email branding
+
+We've improved the branding of emails sent to your customers by using organization-specific 'From' and 'Reply-to' addresses.
+
+Customer emails now appear to come from your organization (e.g., "YourOrg (via Polar)") with replies directed to your organization's email address, providing a more professional and branded experience for your customers.
+
+</Update>
 
 <Update label="2025-06-12">
   ## Update subscription discount
@@ -154,8 +292,4 @@ This is available right now using the [Checkout Session API](/features/checkout/
 - The `product_id` and `product_price_id` fields are deprecated in the [Checkout Session API](/api-reference/checkouts/create-session). You should now use the `products` field to specify the products you want to include in the checkout.
 - The `type` and `recurring_interval` fields on `ProductPrice` are deprecated. `recurring_interval` is now set directly on `Product`.
 
-</Update>
-
-<Update label="2025-02-14">
-  New documentation platform. More improvements incoming.
 </Update>

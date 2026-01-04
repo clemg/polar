@@ -3,8 +3,6 @@
 import Button from '@polar-sh/ui/components/atoms/Button'
 import ShadowBox from '@polar-sh/ui/components/atoms/ShadowBox'
 import { PropsWithChildren } from 'react'
-import { twMerge } from 'tailwind-merge'
-
 const CheckoutSidebarContentWrapper = ({
   title,
   children,
@@ -12,12 +10,12 @@ const CheckoutSidebarContentWrapper = ({
   title: string
 }>) => {
   return (
-    <ShadowBox className="flex min-h-0 w-full max-w-96 flex-shrink-0 flex-grow-0 flex-col p-8">
+    <ShadowBox className="flex min-h-0 w-full max-w-96 shrink-0 grow-0 flex-col p-8">
       <div className="flex h-full flex-col gap-y-8">
         <div className="flex flex-row items-center justify-between">
           <h2 className="text-lg">{title}</h2>
         </div>
-        <div className={twMerge('flex flex-col gap-y-8')}>{children}</div>
+        <div className="flex flex-col gap-y-8">{children}</div>
       </div>
     </ShadowBox>
   )

@@ -1,9 +1,12 @@
 import { useInViewport } from '@/hooks/utils'
-import { AddOutlined, Search } from '@mui/icons-material'
+import AddOutlined from '@mui/icons-material/AddOutlined'
+import Search from '@mui/icons-material/Search'
 import Button, { ButtonProps } from '@polar-sh/ui/components/atoms/Button'
 import Input, { InputProps } from '@polar-sh/ui/components/atoms/Input'
 import { twMerge } from 'tailwind-merge'
 import Spinner from '../Shared/Spinner'
+
+import type { JSX } from 'react'
 
 export interface ContextListItemProps {
   id: string
@@ -53,11 +56,11 @@ export const ContextList = ({
           <Input
             placeholder="Search"
             {...search}
-            className="w-full rounded-none border-none bg-transparent p-0 !shadow-none ring-0 focus:ring-0 focus-visible:ring-0 focus-visible:ring-offset-0 dark:bg-transparent"
+            className="w-full rounded-none border-none bg-transparent p-0 shadow-none! ring-0 focus:ring-0 focus-visible:ring-0 focus-visible:ring-offset-0 dark:bg-transparent"
           />
         </div>
       )}
-      <div className="dark:divide-polar-800 flex h-full flex-grow flex-col divide-y divide-gray-50 overflow-y-auto">
+      <div className="dark:divide-polar-800 flex h-full grow flex-col divide-y divide-gray-50 overflow-y-auto">
         {items.map((item) => (
           <div
             key={item.id}
@@ -71,7 +74,7 @@ export const ContextList = ({
               {item.icon}
               <div className="flex min-w-0 flex-col">
                 <div className="w-full truncate text-sm">{item.title}</div>
-                <div className="w-full truncate text-xs text-gray-500 dark:text-gray-500">
+                <div className="dark:text-polar-500 w-full truncate text-xs text-gray-500">
                   {item.subtitle}
                 </div>
               </div>

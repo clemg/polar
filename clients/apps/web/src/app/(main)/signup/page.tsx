@@ -6,29 +6,27 @@ import { getUserOrganizations } from '@/utils/user'
 import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 
-export default async function Page({
-  searchParams: { return_to, ...rest },
-}: {
-  searchParams: {
+export default async function Page(props: {
+  searchParams: Promise<{
     return_to?: string
-  }
+  }>
 }) {
-  const api = getServerSideAPI()
+  const searchParams = await props.searchParams
+
+  const { return_to, ...rest } = searchParams
+
+  const api = await getServerSideAPI()
   const userOrganizations = await getUserOrganizations(api)
 
   if (userOrganizations.length > 0) {
-    const org = userOrganizations.find(
-      (org) => org.slug === getLastVisitedOrg(cookies()),
-    )
-
-    const targetOrg = org?.slug ?? userOrganizations[0].slug
-
-    redirect(`/dashboard/${targetOrg}`)
+    const lastVisitedOrg = getLastVisitedOrg(await cookies(), userOrganizations)
+    const organization = lastVisitedOrg ? lastVisitedOrg : userOrganizations[0]
+    redirect(`/dashboard/${organization.slug}`)
   }
 
   return (
-    <div className="flex h-full w-full flex-col items-center justify-center">
-      <div className="md:rounded-4xl md:dark:border-polar-700 md:dark:bg-polar-900 grid w-full max-w-7xl grid-cols-1 gap-y-12 p-12 md:grid-cols-3 md:gap-x-32 md:border md:border-gray-200 md:bg-gray-50 md:py-12 md:pl-12 md:pr-0">
+    <div className="flex h-screen w-full flex-col items-center justify-center">
+      <div className="md:dark:border-polar-700 md:dark:bg-polar-900 grid w-full max-w-7xl grid-cols-1 gap-y-12 p-12 md:grid-cols-3 md:gap-x-32 md:rounded-4xl md:border md:border-gray-200 md:bg-gray-50 md:py-12 md:pr-0 md:pl-12">
         <div className="flex flex-col justify-between gap-y-24">
           <LogoIcon className="text-blue-500 dark:text-white" size={80} />
 
@@ -59,15 +57,15 @@ export default async function Page({
             />
           </div>
         </div>
-        <div className="dark:bg-polar-950 dark:border-polar-700 rounded-4xl col-span-2 hidden overflow-hidden rounded-r-none border border-r-0 border-gray-200 bg-gray-100 md:flex">
+        <div className="dark:bg-polar-950 dark:border-polar-700 col-span-2 hidden overflow-hidden rounded-4xl rounded-r-none border border-r-0 border-gray-200 bg-gray-100 md:flex">
           <picture className="flex h-full">
             <source
               media="(prefers-color-scheme: dark)"
-              srcSet={`/assets/landing/overview_dark.png`}
+              srcSet={`/assets/landing/transactions_dark.png`}
             />
             <img
               className="flex h-full flex-1 object-cover object-left"
-              src="/assets/landing/overview.png"
+              src="/assets/landing/transactions_light.png"
               alt="Dashboard Home"
             />
           </picture>

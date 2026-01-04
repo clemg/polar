@@ -1,11 +1,9 @@
 'use client'
 
-import {
-  AccountBalance,
-  ArrowOutwardOutlined,
-  GitHub,
-  ShoppingBagOutlined,
-} from '@mui/icons-material'
+import AccountBalance from '@mui/icons-material/AccountBalance'
+import ArrowOutwardOutlined from '@mui/icons-material/ArrowOutwardOutlined'
+import GitHub from '@mui/icons-material/GitHub'
+import ShoppingBagOutlined from '@mui/icons-material/ShoppingBagOutlined'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import { motion } from 'framer-motion'
 import { Box, Check, LucideIcon } from 'lucide-react'
@@ -29,11 +27,11 @@ const UpsellCard = ({
   return (
     <motion.div className="dark:bg-polar-900 relative flex h-full flex-col gap-y-6 rounded-xl bg-white p-8">
       <div className="flex flex-row items-center gap-3">
-        <Icon className="h-5 w-5 text-gray-600 dark:text-gray-300" />
+        <Icon className="dark:text-polar-300 h-5 w-5 text-gray-600" />
         <h3 className="text-xl">{title}</h3>
       </div>
       <div className="flex flex-1 flex-col justify-start gap-2">
-        <p className="dark:text-polar-500 text-balance text-lg text-gray-500">
+        <p className="dark:text-polar-500 text-lg text-balance text-gray-500">
           {description}
         </p>
       </div>
@@ -80,9 +78,9 @@ export const Upsell = () => {
           icon={Box}
           title="Digital Products"
           description="Manage and distribute your digital products with our robust platform."
-          link="https://docs.polar.sh/documentation/features/products"
+          link="https://polar.sh/docs/documentation/features/products"
         >
-          <ul className="flex flex-col gap-y-1 text-gray-600 dark:text-gray-300">
+          <ul className="dark:text-polar-300 flex flex-col gap-y-1 text-gray-600">
             <li className="flex flex-row items-center gap-x-2">
               <Check className="h-4 w-4 text-emerald-500" />
               Flexible Pricing Models
@@ -104,9 +102,9 @@ export const Upsell = () => {
           icon={ShoppingBagOutlined}
           title="Simple Checkouts"
           description="Streamlined checkouts for a seamless user experience."
-          link="https://docs.polar.sh/documentation/features/checkouts/checkout-links"
+          link="https://polar.sh/docs/documentation/features/checkouts/checkout-links"
         >
-          <ul className="flex flex-col gap-y-1 text-gray-600 dark:text-gray-300">
+          <ul className="dark:text-polar-300 flex flex-col gap-y-1 text-gray-600">
             <li className="flex flex-row items-center gap-x-2">
               <Check className="h-4 w-4 text-emerald-500" />
               Custom Checkout Fields
@@ -130,7 +128,7 @@ export const Upsell = () => {
           description="We believe in building in public & therefore proud to be open source."
           link="https://github.com/polarsource"
         >
-          <ul className="flex flex-col gap-y-1 text-gray-600 dark:text-gray-300">
+          <ul className="dark:text-polar-300 flex flex-col gap-y-1 text-gray-600">
             <li className="flex flex-row items-center gap-x-2">
               <Check className="h-4 w-4 text-emerald-500" />
               Raycast Extension

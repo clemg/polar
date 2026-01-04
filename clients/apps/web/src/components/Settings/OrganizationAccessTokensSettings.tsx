@@ -31,7 +31,7 @@ import {
   FormLabel,
   FormMessage,
 } from '@polar-sh/ui/components/ui/form'
-import { useCallback, useState, type MouseEvent } from 'react'
+import { useCallback, useMemo, useState, type MouseEvent } from 'react'
 import { useForm, useFormContext } from 'react-hook-form'
 import { ConfirmModal } from '../Modal/ConfirmModal'
 import { toast, useToast } from '../Toast/use-toast'
@@ -48,13 +48,20 @@ interface AccessTokenUpdate {
 }
 
 const AccessTokenForm = ({ update }: { update?: boolean }) => {
-  const { control, setValue } = useFormContext<
+  const { control, setValue, watch } = useFormContext<
     AccessTokenCreate | AccessTokenUpdate
   >()
 
-  const selectableScopes =
-    enums.availableScopeValues as schemas['AvailableScope'][]
-  const [allSelected, setSelectAll] = useState(false)
+  const sortedScopes = Array.from(enums.availableScopeValues).sort((a, b) =>
+    a.localeCompare(b),
+  )
+
+  const currentScopes = watch('scopes')
+
+  const allSelected = useMemo(
+    () => sortedScopes.every((scope) => currentScopes.includes(scope)),
+    [currentScopes, sortedScopes],
+  )
 
   const onToggleAll = useCallback(
     (e: MouseEvent<HTMLButtonElement>) => {
@@ -62,12 +69,11 @@ const AccessTokenForm = ({ update }: { update?: boolean }) => {
 
       let values: Array<schemas['AvailableScope']> = []
       if (!allSelected) {
-        values = selectableScopes
+        values = sortedScopes
       }
       setValue('scopes', values)
-      setSelectAll(!allSelected)
     },
-    [setValue, allSelected, selectableScopes],
+    [setValue, allSelected, sortedScopes],
   )
 
   return (
@@ -111,7 +117,7 @@ const AccessTokenForm = ({ update }: { update?: boolean }) => {
                   <SelectContent>
                     {[1, 7, 30, 90, 180, 365].map((days) => (
                       <SelectItem key={days} value={`P${days}D`}>
-                        {days} days
+                        {days} day{days > 1 ? 's' : ''}
                       </SelectItem>
                     ))}
                     <SelectItem value="no-expiration">
@@ -127,9 +133,9 @@ const AccessTokenForm = ({ update }: { update?: boolean }) => {
           )}
         />
       )}
-      <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-4">
         <div className="flex flex-row items-center">
-          <h2 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+          <h2 className="text-sm leading-none font-medium peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
             Scopes
           </h2>
 
@@ -141,14 +147,14 @@ const AccessTokenForm = ({ update }: { update?: boolean }) => {
         </div>
 
         <div className="flex flex-col gap-2">
-          {Object.values(selectableScopes).map((scope) => (
+          {sortedScopes.map((scope) => (
             <FormField
               key={scope}
               control={control}
               name="scopes"
               render={({ field }) => {
                 return (
-                  <FormItem className="flex flex-row items-center space-x-3 space-y-0">
+                  <FormItem className="flex flex-row items-center space-y-0 space-x-3">
                     <FormControl>
                       <Checkbox
                         checked={field.value?.includes(scope)}
@@ -217,7 +223,7 @@ const CreateAccessTokenModal = ({
   )
 
   return (
-    <div className="flex flex-col overflow-y-auto">
+    <div className="flex flex-col">
       <InlineModalHeader hide={onHide}>
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-xl">Create Organization Access Token</h2>
@@ -301,9 +307,11 @@ const UpdateAccessTokenModal = ({
 const AccessTokenItem = ({
   token,
   rawToken,
+  minimal,
 }: {
   token: schemas['OrganizationAccessToken']
   rawToken?: string
+  minimal?: boolean
 }) => {
   const {
     isShown: updateModalShown,
@@ -341,33 +349,35 @@ const AccessTokenItem = ({
         <div className="flex flex-row">
           <div className="gap-y flex flex-col">
             <h3 className="text-md">{token.comment}</h3>
-            <p className="dark:text-polar-400 text-sm text-gray-500">
-              {token.expires_at ? (
-                <>
-                  Expires on{' '}
-                  <FormattedDateTime
-                    datetime={token.expires_at}
-                    dateStyle="long"
-                  />
-                </>
-              ) : (
-                <span className="text-red-500 dark:text-red-400">
-                  Never expires
-                </span>
-              )}{' '}
-              —{' '}
-              {token.last_used_at ? (
-                <>
-                  Last used on{' '}
-                  <FormattedDateTime
-                    datetime={token.last_used_at}
-                    dateStyle="long"
-                  />
-                </>
-              ) : (
-                'Never used'
-              )}
-            </p>
+            {!minimal && (
+              <p className="dark:text-polar-400 text-sm text-gray-500">
+                {token.expires_at ? (
+                  <>
+                    Expires on{' '}
+                    <FormattedDateTime
+                      datetime={token.expires_at}
+                      dateStyle="long"
+                    />
+                  </>
+                ) : (
+                  <span className="text-red-500 dark:text-red-400">
+                    Never expires
+                  </span>
+                )}{' '}
+                —{' '}
+                {token.last_used_at ? (
+                  <>
+                    Last used on{' '}
+                    <FormattedDateTime
+                      datetime={token.last_used_at}
+                      dateStyle="long"
+                    />
+                  </>
+                ) : (
+                  'Never used'
+                )}
+              </p>
+            )}
           </div>
         </div>{' '}
         <div className="dark:text-polar-400 flex flex-row items-center gap-2 text-gray-500">
@@ -423,11 +433,19 @@ const AccessTokenItem = ({
   )
 }
 
+interface OrganizationAccessTokensSettingsProps {
+  organization: schemas['Organization']
+  singleTokenMode?: boolean
+  onTokenCreated?: (token: string) => void
+  minimal?: boolean
+}
+
 const OrganizationAccessTokensSettings = ({
   organization,
-}: {
-  organization: schemas['Organization']
-}) => {
+  singleTokenMode = false,
+  onTokenCreated,
+  minimal = false,
+}: OrganizationAccessTokensSettingsProps) => {
   const tokens = useOrganizationAccessTokens(organization.id)
   const [createdToken, setCreatedToken] =
     useState<schemas['OrganizationAccessTokenCreateResponse']>()
@@ -443,12 +461,60 @@ const OrganizationAccessTokensSettings = ({
   ) => {
     hideCreateModal()
     setCreatedToken(token)
+    onTokenCreated?.(token.token)
+  }
+
+  const hasTokens =
+    (tokens.data?.items && tokens.data.items.length > 0) || createdToken
+  const showNewTokenButton = !singleTokenMode || !hasTokens
+
+  const hasExistingTokens = tokens.data?.items && tokens.data.items.length > 0
+
+  // Minimal mode: just show a button or the created token
+  if (minimal) {
+    return (
+      <div className="flex w-full flex-col items-start gap-y-4">
+        {hasExistingTokens
+          ? tokens.data?.items.map((token) => {
+              const isNewToken =
+                token.id === createdToken?.organization_access_token.id
+              return (
+                <div
+                  key={token.id}
+                  className="dark:ring-polar-700 dark:bg-polar-800 w-full rounded-2xl bg-transparent p-5 ring-1 ring-gray-200"
+                >
+                  <AccessTokenItem
+                    token={token}
+                    minimal={minimal}
+                    rawToken={isNewToken ? createdToken?.token : undefined}
+                  />
+                </div>
+              )
+            })
+          : showNewTokenButton && (
+              <Button onClick={showCreateModal} size="sm">
+                Create Access Token
+              </Button>
+            )}
+        <InlineModal
+          isShown={createModalShown}
+          hide={hideCreateModal}
+          modalContent={
+            <CreateAccessTokenModal
+              organization={organization}
+              onSuccess={onCreate}
+              onHide={hideCreateModal}
+            />
+          }
+        />
+      </div>
+    )
   }
 
   return (
     <div className="flex w-full flex-col">
       <ShadowListGroup>
-        {tokens.data?.items && tokens.data.items.length > 0 ? (
+        {hasExistingTokens ? (
           tokens.data?.items.map((token) => {
             const isNewToken =
               token.id === createdToken?.organization_access_token.id
@@ -469,13 +535,15 @@ const OrganizationAccessTokensSettings = ({
             </p>
           </ShadowListGroup.Item>
         )}
-        <ShadowListGroup.Item>
-          <div className="flex flex-row items-center gap-x-4">
-            <Button asChild onClick={showCreateModal} size="sm">
-              New Token
-            </Button>
-          </div>
-        </ShadowListGroup.Item>
+        {showNewTokenButton && (
+          <ShadowListGroup.Item>
+            <div className="flex flex-row items-center gap-x-4">
+              <Button asChild onClick={showCreateModal} size="sm">
+                New Token
+              </Button>
+            </div>
+          </ShadowListGroup.Item>
+        )}
         <InlineModal
           isShown={createModalShown}
           hide={hideCreateModal}

@@ -58,18 +58,13 @@ class TestListWebhookEndpoints:
 class TestCreateWebhookEndpoint:
     @pytest.mark.auth(AuthSubjectFixture(scopes=set()))
     async def test_user_missing_scope(self, client: AsyncClient) -> None:
-        params = {
-            "url": "https://example.com/hook",
-            "format": "raw",
-            "secret": "foo",
-            "events": [],
-        }
+        params = {"url": "https://example.com/hook", "format": "raw", "events": []}
         response = await client.post("/v1/webhooks/endpoints", json=params)
 
         assert response.status_code == 403
 
     @pytest.mark.auth(
-        AuthSubjectFixture(scopes={Scope.web_default}),
+        AuthSubjectFixture(scopes={Scope.web_write}),
         AuthSubjectFixture(scopes={Scope.webhooks_write}),
     )
     async def test_user_valid(
@@ -81,7 +76,6 @@ class TestCreateWebhookEndpoint:
         params = {
             "url": "https://example.com/hook",
             "format": "raw",
-            "secret": "foo",
             "events": [],
             "organization_id": str(organization.id),
         }
@@ -91,12 +85,7 @@ class TestCreateWebhookEndpoint:
 
     @pytest.mark.auth(AuthSubjectFixture(subject="organization", scopes=set()))
     async def test_organization_missing_scope(self, client: AsyncClient) -> None:
-        params = {
-            "url": "https://example.com/hook",
-            "secret": "foo",
-            "format": "raw",
-            "events": [],
-        }
+        params = {"url": "https://example.com/hook", "format": "raw", "events": []}
         response = await client.post("/v1/webhooks/endpoints", json=params)
 
         assert response.status_code == 403
@@ -107,12 +96,7 @@ class TestCreateWebhookEndpoint:
     async def test_organization_valid_creator_webhooks_write_scope(
         self, client: AsyncClient
     ) -> None:
-        params = {
-            "url": "https://example.com/hook",
-            "format": "raw",
-            "secret": "foo",
-            "events": [],
-        }
+        params = {"url": "https://example.com/hook", "format": "raw", "events": []}
         response = await client.post("/v1/webhooks/endpoints", json=params)
 
         assert response.status_code == 201
@@ -134,7 +118,7 @@ class TestUpdateWebhookEndpoint:
         assert response.status_code == 403
 
     @pytest.mark.auth(
-        AuthSubjectFixture(scopes={Scope.web_default}),
+        AuthSubjectFixture(scopes={Scope.web_write}),
         AuthSubjectFixture(scopes={Scope.webhooks_write}),
     )
     async def test_user_valid(
@@ -188,7 +172,7 @@ class TestDeleteWebhookEndpoint:
         assert response.status_code == 403
 
     @pytest.mark.auth(
-        AuthSubjectFixture(scopes={Scope.web_default}),
+        AuthSubjectFixture(scopes={Scope.web_write}),
         AuthSubjectFixture(scopes={Scope.webhooks_write}),
     )
     async def test_user_valid(

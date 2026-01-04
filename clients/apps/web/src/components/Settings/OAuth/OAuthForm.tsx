@@ -15,12 +15,15 @@ import {
   FormLabel,
   FormMessage,
 } from '@polar-sh/ui/components/ui/form'
+import { type MouseEvent } from 'react'
 
 import ImageUpload from '@/components/Form/ImageUpload'
-import { AddOutlined, ClearOutlined } from '@mui/icons-material'
+import AddOutlined from '@mui/icons-material/AddOutlined'
+import ClearOutlined from '@mui/icons-material/ClearOutlined'
 import { enums } from '@polar-sh/client'
 import { Checkbox } from '@polar-sh/ui/components/ui/checkbox'
 import Link from 'next/link'
+import { useCallback, useMemo } from 'react'
 import { useFieldArray, useFormContext } from 'react-hook-form'
 import { EnhancedOAuth2ClientConfiguration } from './NewOAuthClientModal'
 
@@ -82,7 +85,7 @@ export const FieldClientType = () => {
             <em>Confidential Client</em>.{' '}
             <Link
               className="text-blue-500 hover:text-blue-400 dark:text-blue-400 dark:hover:text-blue-300"
-              href="https://docs.polar.sh/documentation/integration-guides/authenticating-with-polar"
+              href="https://polar.sh/docs/documentation/integration-guides/authenticating-with-polar"
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -129,7 +132,7 @@ export const FieldClientSecret = ({
         SPA or mobile app.{' '}
         <Link
           className="text-blue-500 hover:text-blue-400 dark:text-blue-400 dark:hover:text-blue-300"
-          href="https://docs.polar.sh/documentation/integration-guides/authenticating-with-polar"
+          href="https://polar.sh/docs/documentation/integration-guides/authenticating-with-polar"
           target="_blank"
           rel="noopener noreferrer"
         >
@@ -252,28 +255,59 @@ export const FieldRedirectURIs = () => {
 }
 
 export const FieldScopes = () => {
-  const form = useFormContext<EnhancedOAuth2ClientConfiguration>()
+  const { control, watch, setValue } =
+    useFormContext<EnhancedOAuth2ClientConfiguration>()
+  const sortedAvailableScopes = Array.from(enums.availableScopeValues).sort(
+    (a, b) => a.localeCompare(b),
+  )
+
+  const currentScopes = watch('scope')
+
+  const allSelected = useMemo(
+    () => sortedAvailableScopes.every((scope) => currentScopes.includes(scope)),
+    [currentScopes, sortedAvailableScopes],
+  )
+
+  const onToggleAll = useCallback(
+    (e: MouseEvent<HTMLButtonElement>) => {
+      e.preventDefault()
+
+      let values: typeof currentScopes = []
+      if (!allSelected) {
+        values = sortedAvailableScopes
+      }
+
+      setValue('scope', values)
+    },
+    [setValue, allSelected, sortedAvailableScopes],
+  )
 
   return (
-    <div className="flex flex-col gap-6">
-      <h2 className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
-        Scopes
-      </h2>
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-row items-center">
+        <h2 className="text-sm leading-none font-medium peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+          Scopes
+        </h2>
+
+        <div className="flex-auto text-right">
+          <Button onClick={onToggleAll} variant="secondary" size="sm">
+            {!allSelected ? 'Select All' : 'Unselect All'}
+          </Button>
+        </div>
+      </div>
 
       <div className="flex flex-col gap-2">
-        {Object.values(enums.availableScopeValues).map((scope) => (
+        {sortedAvailableScopes.map((scope) => (
           <FormField
             key={scope}
-            control={form.control}
+            control={control}
             name="scope"
             render={({ field }) => {
               return (
-                <FormItem className="flex flex-row items-center space-x-3 space-y-0">
+                <FormItem className="flex flex-row items-center space-y-0 space-x-3">
                   <FormControl>
                     <Checkbox
-                      defaultChecked={
-                        field.value && field.value.includes(scope)
-                      }
+                      checked={field.value?.includes(scope)}
                       onCheckedChange={(checked) => {
                         if (checked) {
                           field.onChange([...(field.value || []), scope])

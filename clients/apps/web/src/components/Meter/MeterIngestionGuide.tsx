@@ -16,12 +16,12 @@ export const MeterIngestionGuide = () => {
   return (
     <SyntaxHighlighterProvider>
       <div className="flex h-full flex-col items-center justify-center gap-6 py-12">
-        <Well className="rounded-4xl flex flex-col gap-12 p-4 md:flex-row">
+        <Well className="flex flex-col gap-12 rounded-4xl p-4 md:flex-row">
           <div className="flex w-full flex-col gap-6 p-6 md:max-w-sm">
             <WellHeader>
               <h2 className="text-2xl">Usage Billing with Meters</h2>
             </WellHeader>
-            <WellContent className="flex flex-grow flex-col justify-between gap-6">
+            <WellContent className="flex grow flex-col justify-between gap-6">
               <div className="flex flex-col gap-4">
                 <p className="dark:text-polar-300 text-gray-700">
                   Meters are aggregated filters on ingested events. They are
@@ -36,13 +36,13 @@ export const MeterIngestionGuide = () => {
                 </p>
               </div>
               <Link
-                href={`/dashboard/${organization.slug}/usage-billing/meters/create`}
+                href={`/dashboard/${organization.slug}/products/meters/create`}
               >
                 <Button>Create Meter</Button>
               </Link>
             </WellContent>
           </div>
-          <Well className="dark:bg-polar-900 flex-1 flex-shrink overflow-auto bg-white p-6 text-sm">
+          <Well className="dark:bg-polar-900 flex-1 shrink overflow-auto bg-white p-6 text-sm">
             <SyntaxHighlighterClient
               lang="typescript"
               code={`import { Polar } from "@polar-sh/sdk";

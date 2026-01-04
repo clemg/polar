@@ -1,44 +1,53 @@
 ---
-title: Polar as Model Context Protocol (MCP)
-description: Extend the capabilities of your AI Agents with Polar as MCP Server
+title: Polar over Model Context Protocol (MCP)
+description: Extend the capabilities of your AI agents with Polar's MCP Server
 sidebarTitle: Model Context Protocol (MCP)
 ---
 
 <img src="/assets/integrate/mcp/mcp.png" />
 
-Supercharge your AI Agents with Polar as a Model Context Protocol (MCP) server.
+Supercharge your AI agents with Polar as a Model Context Protocol (MCP) server.
 
 ## What is MCP?
 
-MCP is a protocol for integrating tools with AI Agents. It can greatly enhance the capabilities of your AI Agents by providing them with real-time data and context.
+MCP is a protocol for integrating tools with AI agents. It can greatly enhance the capabilities of your AI agents by providing them with real-time data and context.
 
-Polar has MCP support built into the Polar TypeScript SDK.
+Polar offers a remote MCP server that you can connect to from most AI clients.
 
 ## How does it work?
 
-You need a MCP-capable Agent environment to use Polar as an MCP server. A few of them are Claude and Cursor.
+You need a MCP-capable agent environment to use Polar over MCP. A few of them are Claude Desktop and Cursor.
 
-## Using Polar as an MCP server
+## Connecting to Polar MCP
 
-### Claude
+Polar provides two MCP servers:
 
-Add the following server definition to your claude_desktop_config.json file:
+- **Production**: `https://mcp.polar.sh/mcp/polar-mcp` - Connect to your live Polar organization
+- **Sandbox**: `https://mcp.polar.sh/mcp/polar-sandbox` - Connect to the Polar sandbox environment for testing
+
+When you can specify a MCP URL, use one of the URLs above depending on your environment.
+
+If you have to specify a command, use:
 
 ```json
 {
   "mcpServers": {
     "Polar": {
       "command": "npx",
-      "args": [
-        "-y",
-        "--package",
-        "@polar-sh/sdk",
-        "--",
-        "mcp",
-        "start",
-        "--access-token",
-        "..."
-      ]
+      "args": ["mcp-remote", "https://mcp.polar.sh/mcp/polar-mcp"]
+    }
+  }
+}
+```
+
+For sandbox:
+
+```json
+{
+  "mcpServers": {
+    "Polar Sandbox": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://mcp.polar.sh/mcp/polar-sandbox"]
     }
   }
 }
@@ -46,20 +55,122 @@ Add the following server definition to your claude_desktop_config.json file:
 
 ### Cursor
 
-Go to Cursor Settings > Features > MCP Servers > Add new MCP server and use the following settings:
+In `.cursor/mcp.json`, add:
 
-- Name: Polar
-- Type: command
-- Command:
-
-```bash
-npx -y --package @polar-sh/sdk -- mcp start --access-token ...
+```json
+{
+  "mcpServers": {
+    "Polar": {
+      "url": "https://mcp.polar.sh/mcp/polar-mcp"
+    }
+  }
+}
 ```
 
-### Help
+For sandbox:
 
-For a full list of server arguments, run:
-
-```bash
-npx -y --package @polar-sh/sdk -- mcp start --help
+```json
+{
+  "mcpServers": {
+    "Polar Sandbox": {
+      "url": "https://mcp.polar.sh/mcp/polar-sandbox"
+    }
+  }
+}
 ```
+
+### Windsurf
+
+In `mcp_config.json`, add:
+
+```json
+{
+  "mcpServers": {
+    "Polar": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://mcp.polar.sh/mcp/polar-mcp"]
+    }
+  }
+}
+```
+
+For sandbox:
+
+```json
+{
+  "mcpServers": {
+    "Polar Sandbox": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://mcp.polar.sh/mcp/polar-sandbox"]
+    }
+  }
+}
+```
+
+### Codex
+
+Add the following to your `~/.codex/config.toml`:
+
+```toml
+[features]
+rmcp_client = true
+
+[mcp_servers.polar]
+type = "http"
+url = "https://mcp.polar.sh/mcp/polar-mcp"
+```
+
+Then run:
+
+```sh
+codex mcp login polar
+```
+
+For sandbox:
+
+```toml
+[features]
+rmcp_client = true
+
+[mcp_servers.polar_sandbox]
+type = "http"
+url = "https://mcp.polar.sh/mcp/polar-sandbox"
+```
+
+Then run:
+
+```sh
+codex mcp login polar_sandbox
+```
+
+### Claude Code
+
+Run the following command:
+
+```
+claude mcp add --transport http "Polar" "https://mcp.polar.sh/mcp/polar-mcp"
+```
+
+For sandbox:
+
+```
+claude mcp add --transport http "Polar Sandbox" "https://mcp.polar.sh/mcp/polar-sandbox"
+```
+
+### ChatGPT
+
+MCP is only available for paid users in beta on ChatGPT web, by enabling Developer Mode.
+
+Once Developer Mode is enabled, go to _Settings_ → _Connectors_ and add the MCP server using `https://mcp.polar.sh/mcp/polar-mcp`.
+
+For sandbox, use `https://mcp.polar.sh/mcp/polar-sandbox` instead.
+
+### Claude Desktop
+
+Go to _Settings_ → _Connectors_ and click _Add custom connector_.
+
+Name it "Polar" and add `https://mcp.polar.sh/mcp/polar-mcp` as the server URL.
+
+For sandbox, use `https://mcp.polar.sh/mcp/polar-sandbox` as the server URL instead.
+
+Save, and click _Connect_ to connect to your Polar organization.

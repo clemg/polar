@@ -45,6 +45,7 @@ class CustomerBenefitGrantBase(IDSchema, TimestampedSchema):
     granted_at: datetime | None
     revoked_at: datetime | None
     customer_id: UUID4
+    member_id: UUID4 | None = None
     benefit_id: UUID4
     subscription_id: UUID4 | None
     order_id: UUID4 | None
@@ -109,7 +110,7 @@ class CustomerBenefitGrantUpdateBase(Schema):
 
 
 class CustomerBenefitGrantDiscordPropertiesUpdate(TypedDict):
-    account_id: str
+    account_id: str | None
 
 
 class CustomerBenefitGrantDiscordUpdate(CustomerBenefitGrantUpdateBase):
@@ -121,7 +122,7 @@ class CustomerBenefitGrantDiscordUpdate(CustomerBenefitGrantUpdateBase):
 
 
 class CustomerBenefitGrantGitHubRepositoryPropertiesUpdate(TypedDict):
-    account_id: str
+    account_id: str | None
 
 
 class CustomerBenefitGrantGitHubRepositoryUpdate(CustomerBenefitGrantUpdateBase):

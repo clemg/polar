@@ -8,14 +8,17 @@ from sqlalchemy import (
     TIMESTAMP,
     Boolean,
     Column,
+    ColumnElement,
     ForeignKey,
     Integer,
     String,
     Text,
     Uuid,
+    and_,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 from sqlalchemy.schema import Index, UniqueConstraint
 
@@ -34,6 +37,7 @@ class OAuthPlatform(StrEnum):
     github = "github"
     github_repository_benefit = "github_repository_benefit"
     google = "google"
+    apple = "apple"
 
 
 class IdentityVerificationStatus(StrEnum):
@@ -105,6 +109,8 @@ class User(RecordModel):
         ),
     )
 
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
@@ -159,6 +165,15 @@ class User(RecordModel):
     )
 
     meta: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    @hybrid_property
+    def can_authenticate(self) -> bool:
+        return self.deleted_at is None and self.blocked_at is None
+
+    @can_authenticate.inplace.expression
+    @classmethod
+    def _can_authenticate_expression(cls) -> ColumnElement[bool]:
+        return and_(cls.deleted_at.is_(None), cls.blocked_at.is_(None))
 
     @property
     def signup_attribution(self) -> dict[str, Any]:

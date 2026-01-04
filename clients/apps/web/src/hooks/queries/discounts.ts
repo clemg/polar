@@ -1,4 +1,4 @@
-import { queryClient } from '@/utils/api/query'
+import { getQueryClient } from '@/utils/api/query'
 import { api } from '@/utils/client'
 import { operations, schemas, unwrap } from '@polar-sh/client'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -11,6 +11,7 @@ const invalidateDiscountsQueries = ({
   id?: string
   organizationId?: string
 }) => {
+  const queryClient = getQueryClient()
   if (id) {
     queryClient.invalidateQueries({
       queryKey: ['discounts', 'id', id],
@@ -23,6 +24,23 @@ const invalidateDiscountsQueries = ({
     })
   }
 }
+
+export const useDiscount = (organizationId: string, id?: string | null) =>
+  useQuery({
+    queryKey: ['discounts', 'detail', { organizationId, id }],
+    queryFn: () =>
+      unwrap(
+        api.GET('/v1/discounts/{id}', {
+          params: {
+            path: {
+              id: id!,
+            },
+          },
+        }),
+      ),
+    retry: defaultRetry,
+    enabled: !!id,
+  })
 
 export const useDiscounts = (
   organizationId: string,

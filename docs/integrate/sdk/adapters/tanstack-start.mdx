@@ -3,24 +3,52 @@ title: "TanStack Start"
 description: "Payments and Checkouts made dead simple with TanStack Start"
 ---
 
-`pnpm install @polar-sh/tanstack-start zod`
+## Examples
+
+- [With TanStack Start](https://github.com/polarsource/examples/tree/main/with-tanstack-start)
+
+## Installation
+
+Install the required Polar packages using the following command:
+
+<Tabs>
+  <Tab title="npm">
+    ```bash Terminal
+    npm install zod @polar-sh/tanstack-start
+    ```
+  </Tab>
+  <Tab title="yarn">
+    ```bash Terminal
+    yarn add zod @polar-sh/tanstack-start
+    ```
+  </Tab>
+  <Tab title="pnpm">
+    ```bash Terminal
+    pnpm add zod @polar-sh/tanstack-start
+    ```
+  </Tab>
+</Tabs>
 
 ## Checkout
 
 Create a Checkout handler which takes care of redirections.
 
-```typescript
-// routes/api/checkout.ts
+```typescript icon="square-js" routes/api/checkout.ts
 import { Checkout } from "@polar-sh/tanstack-start";
-import { createAPIFileRoute } from "@tanstack/react-start/api";
+import { createFileRoute } from "@tanstack/react-start";
 
-export const APIRoute = createAPIFileRoute("/api/checkout")({
-  GET: Checkout({
-    accessToken: process.env.POLAR_ACCESS_TOKEN,
-    successUrl: process.env.SUCCESS_URL,
-    server: "sandbox", // Use sandbox if you're testing Polar - omit the parameter or pass 'production' otherwise
-    theme: "dark", // Enforces the theme - System-preferred theme will be set if left omitted
-  }),
+export const Route = createFileRoute("/api/checkout")({
+  server: {
+    handlers: {
+      GET: Checkout({
+        accessToken: process.env.POLAR_ACCESS_TOKEN,
+        successUrl: process.env.SUCCESS_URL,
+        returnUrl: "https://myapp.com", // An optional URL which renders a back-button in the Checkout
+        server: "sandbox", // Use sandbox if you're testing Polar - omit the parameter or pass 'production' otherwise
+        theme: "dark", // Enforces the theme - System-preferred theme will be set if left omitted
+      }),
+    },
+  },
 });
 ```
 
@@ -39,18 +67,22 @@ Pass query params to this route.
 
 Create a customer portal where your customer can view orders and subscriptions.
 
-```typescript
-// routes/api/portal.ts
+```typescript icon="square-js" routes/api/portal.ts
 import { CustomerPortal } from "@polar-sh/tanstack-start";
-import { createAPIFileRoute } from "@tanstack/react-start/api";
+import { createFileRoute } from "@tanstack/react-start";
 import { getSupabaseServerClient } from "~/servers/supabase-server";
 
-export const APIRoute = createAPIFileRoute("/api/portal")({
-  GET: CustomerPortal({
-    accessToken: process.env.POLAR_ACCESS_TOKEN,
-    getCustomerId: async (request: Request) => "", // Function to resolve a Polar Customer ID
-    server: "sandbox", // Use sandbox if you're testing Polar - omit the parameter or pass 'production' otherwise
-  }),
+export const Route = createFileRoute("/api/portal")({
+  server: {
+    handlers: {
+      GET: CustomerPortal({
+        accessToken: POLAR_ACCESS_TOKEN,
+        getCustomerId: async (request: Request) => "", // Function to resolve a Polar Customer ID
+        returnUrl: "https://myapp.com", // An optional URL which renders a back-button in the Checkout
+        server: "sandbox", // Use sandbox if you're testing Polar - omit the parameter or pass 'production' otherwise
+      }),
+    },
+  },
 });
 ```
 
@@ -58,20 +90,24 @@ export const APIRoute = createAPIFileRoute("/api/portal")({
 
 A simple utility which resolves incoming webhook payloads by signing the webhook secret properly.
 
-```typescript
-// api/webhook/polar.ts
+```typescript icon="square-js" routes/api/webhook/polar.ts
 import { Webhooks } from "@polar-sh/tanstack-start";
-import { createAPIFileRoute } from "@tanstack/react-start/api";
+import { createFileRoute } from "@tanstack/react-router";
 
-export const APIRoute = createAPIFileRoute("/api/webhook/polar")({
-  POST: Webhooks({
-    webhookSecret: process.env.POLAR_WEBHOOK_SECRET!,
-    onPayload: async (payload) => {
-      // Handle the payload
-      // No need to return an acknowledge response
+export const Route = createFileRoute("/api/webhook/polar")({
+  server: {
+    handlers: {
+      POST: Webhooks({
+        webhookSecret: process.env.POLAR_WEBHOOK_SECRET!,
+        onPayload: async (payload) => {
+          // Handle the payload
+          // No need to return an acknowledge response
+        },
+      }),
     },
-  }),
+  },
 });
+
 ```
 
 #### Payload Handlers

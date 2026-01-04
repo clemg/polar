@@ -3,19 +3,26 @@ from fastapi import APIRouter
 from polar.account.endpoints import router as accounts_router
 from polar.auth.endpoints import router as auth_router
 from polar.benefit.endpoints import router as benefits_router
+from polar.benefit.grant.endpoints import router as benefit_grants_router
 from polar.checkout.endpoints import router as checkout_router
 from polar.checkout_link.endpoints import router as checkout_link_router
 from polar.custom_field.endpoints import router as custom_field_router
 from polar.customer.endpoints import router as customer_router
 from polar.customer_meter.endpoints import router as customer_meter_router
 from polar.customer_portal.endpoints import router as customer_portal_router
+from polar.customer_seat.endpoints import router as customer_seat_router
 from polar.customer_session.endpoints import router as customer_session_router
 from polar.discount.endpoints import router as discount_router
+from polar.dispute.endpoints import router as dispute_router
 from polar.email_update.endpoints import router as email_update_router
-from polar.embed.endpoints import router as embed_router
 from polar.event.endpoints import router as event_router
+from polar.event_type.endpoints import router as event_type_router
 from polar.eventstream.endpoints import router as stream_router
 from polar.file.endpoints import router as files_router
+from polar.integrations.apple.endpoints import router as apple_router
+from polar.integrations.chargeback_stop.endpoints import (
+    router as chargeback_stop_router,
+)
 from polar.integrations.discord.endpoints import router as discord_router
 from polar.integrations.github.endpoints import router as github_router
 from polar.integrations.github_repository_benefit.endpoints import (
@@ -26,7 +33,7 @@ from polar.integrations.plain.endpoints import router as plain_router
 from polar.integrations.stripe.endpoints import router as stripe_router
 from polar.license_key.endpoints import router as license_key_router
 from polar.login_code.endpoints import router as login_code_router
-from polar.magic_link.endpoints import router as magic_link_router
+from polar.member.endpoints import router as member_router
 from polar.meter.endpoints import router as meter_router
 from polar.metrics.endpoints import router as metrics_router
 from polar.notifications.endpoints import router as notifications_router
@@ -38,12 +45,14 @@ from polar.organization_access_token.endpoints import (
 )
 from polar.payment.endpoints import router as payment_router
 from polar.payout.endpoints import router as payout_router
+from polar.personal_access_token.endpoints import router as pat_router
 from polar.product.endpoints import router as product_router
 from polar.refund.endpoints import router as refund_router
 from polar.storefront.endpoints import router as storefront_router
 from polar.subscription.endpoints import router as subscription_router
 from polar.transaction.endpoints import router as transaction_router
 from polar.user.endpoints import router as user_router
+from polar.wallet.endpoints import router as wallet_router
 from polar.webhook.endpoints import router as webhook_router
 
 router = APIRouter(prefix="/v1")
@@ -58,12 +67,14 @@ router.include_router(github_repository_benefit_router)
 router.include_router(stripe_router)
 # /integrations/discord
 router.include_router(discord_router)
-# /magic-link
-router.include_router(magic_link_router)
+# /integrations/apple
+router.include_router(apple_router)
 # /login-code
 router.include_router(login_code_router)
 # /notifications
 router.include_router(notifications_router)
+# /personal_access_tokens
+router.include_router(pat_router)
 # /accounts
 router.include_router(accounts_router)
 # /stream
@@ -80,6 +91,8 @@ router.include_router(auth_router)
 router.include_router(oauth2_router)
 # /benefits
 router.include_router(benefits_router)
+# /benefit-grants
+router.include_router(benefit_grants_router)
 # /webhooks
 router.include_router(webhook_router)
 # /products
@@ -88,6 +101,8 @@ router.include_router(product_router)
 router.include_router(order_router)
 # /refunds
 router.include_router(refund_router)
+# /disputes
+router.include_router(dispute_router)
 # /checkouts
 router.include_router(checkout_router)
 # /files
@@ -104,14 +119,16 @@ router.include_router(checkout_link_router)
 router.include_router(storefront_router)
 # /custom-fields
 router.include_router(custom_field_router)
-# /embed
-router.include_router(embed_router)
 # /discounts
 router.include_router(discount_router)
 # /customers
 router.include_router(customer_router)
+# /members
+router.include_router(member_router)
 # /customer-portal
 router.include_router(customer_portal_router)
+# /seats
+router.include_router(customer_seat_router)
 # /update-email
 router.include_router(email_update_router)
 # /customer-sessions
@@ -120,6 +137,8 @@ router.include_router(customer_session_router)
 router.include_router(plain_router)
 # /events
 router.include_router(event_router)
+# /event-types
+router.include_router(event_type_router)
 # /meters
 router.include_router(meter_router)
 # /organization-access-tokens
@@ -130,3 +149,7 @@ router.include_router(customer_meter_router)
 router.include_router(payment_router)
 # /payouts
 router.include_router(payout_router)
+# /wallets
+router.include_router(wallet_router)
+# /integrations/chargeback-stop
+router.include_router(chargeback_stop_router)

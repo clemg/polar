@@ -1,5 +1,26 @@
 # @polar-sh/checkout
 
+## 0.1.14
+
+### Patch Changes
+
+- d9a45ea: Bump dependencies and setup trusted publishing
+- 258bdb1: Dependency upgrades, including React 19 peer dependency support
+- Updated dependencies [258bdb1]
+  - @polar-sh/ui@0.1.2
+
+## 0.1.13
+
+### Patch Changes
+
+- f22a0d1: Update Polar SDK
+
+## 0.1.12
+
+### Patch Changes
+
+- 4d49e8f: Fix console error when the iframe is already closed
+
 ## 0.1.11
 
 ### Patch Changes

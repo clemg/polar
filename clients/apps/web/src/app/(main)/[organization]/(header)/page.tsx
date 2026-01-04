@@ -1,14 +1,13 @@
 import { getServerSideAPI } from '@/utils/client/serverside'
 import { getStorefrontOrNotFound } from '@/utils/storefront'
 import type { Metadata } from 'next'
-import ClientPage from './ClientPage'
+import AppPage from './AppPage'
 
-export async function generateMetadata({
-  params,
-}: {
-  params: { organization: string }
+export async function generateMetadata(props: {
+  params: Promise<{ organization: string }>
 }): Promise<Metadata> {
-  const api = getServerSideAPI()
+  const params = await props.params
+  const api = await getServerSideAPI()
   const { organization } = await getStorefrontOrNotFound(
     api,
     params.organization,
@@ -46,16 +45,15 @@ export async function generateMetadata({
   }
 }
 
-export default async function Page({
-  params,
-}: {
-  params: { organization: string }
+export default async function Page(props: {
+  params: Promise<{ organization: string }>
 }) {
-  const api = getServerSideAPI()
+  const params = await props.params
+  const api = await getServerSideAPI()
   const { organization, products } = await getStorefrontOrNotFound(
     api,
     params.organization,
   )
 
-  return <ClientPage organization={organization} products={products} />
+  return <AppPage organization={organization} products={products} />
 }

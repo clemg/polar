@@ -6,17 +6,26 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal, LiteralString, Protocol, TypedDict
 
 import stdnum.ca.bn
+import stdnum.cl.rut
 import stdnum.exceptions
+import stdnum.in_.gstin
+import stdnum.tr.vkn
+import stdnum.vn.mst
 import stripe as stripe_lib
+import structlog
 from pydantic import Field
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.types import TypeDecorator
 from stdnum import get_cc_module
 
+from polar.config import settings
 from polar.exceptions import PolarError
 from polar.integrations.stripe.service import stripe as stripe_service
 from polar.kit.address import Address
+from polar.logging import Logger
+
+log: Logger = structlog.get_logger()
 
 
 class TaxIDFormat(StrEnum):
@@ -241,10 +250,74 @@ class CAGSTHSTValidator(ValidatorProtocol):
             raise InvalidTaxID(number, country) from e
 
 
+class CLTINValidator(ValidatorProtocol):
+    def validate(self, number: str, country: str) -> str:
+        number = stdnum.cl.rut.compact(number)
+        try:
+            return stdnum.cl.rut.validate(number)
+        except stdnum.exceptions.ValidationError as e:
+            raise InvalidTaxID(number, country) from e
+
+
+class TRTINValidator(ValidatorProtocol):
+    def validate(self, number: str, country: str) -> str:
+        number = stdnum.tr.vkn.compact(number)
+        try:
+            return stdnum.tr.vkn.validate(number)
+        except stdnum.exceptions.ValidationError as e:
+            raise InvalidTaxID(number, country) from e
+
+
+class INGSTValidator(ValidatorProtocol):
+    def validate(self, number: str, country: str) -> str:
+        number = stdnum.in_.gstin.compact(number)
+        try:
+            return stdnum.in_.gstin.validate(number)
+        except stdnum.exceptions.ValidationError as e:
+            raise InvalidTaxID(number, country) from e
+
+
+class VNTINValidator(ValidatorProtocol):
+    def validate(self, number: str, country: str) -> str:
+        number = stdnum.vn.mst.compact(number)
+        try:
+            return stdnum.vn.mst.validate(number)
+        except stdnum.exceptions.ValidationError as e:
+            raise InvalidTaxID(number, country) from e
+
+
+class AETRNValidator(ValidatorProtocol):
+    """
+    Validator for UAE Tax Registration Number (TRN).
+
+    The UAE TRN is a 15-digit number issued by the Federal Tax Authority.
+    """
+
+    def validate(self, number: str, country: str) -> str:
+        # Remove spaces, dashes, and other common separators
+        number = number.replace(" ", "").replace("-", "").replace(".", "").strip()
+        # Validate: must be exactly 15 digits
+        if len(number) != 15 or not number.isdigit():
+            raise InvalidTaxID(number, country)
+        return number
+
+
 def _get_validator(tax_id_type: TaxIDFormat) -> ValidatorProtocol:
-    if tax_id_type == TaxIDFormat.ca_gst_hst:
-        return CAGSTHSTValidator()
-    return StdNumValidator(tax_id_type)
+    match tax_id_type:
+        case TaxIDFormat.ae_trn:
+            return AETRNValidator()
+        case TaxIDFormat.ca_gst_hst:
+            return CAGSTHSTValidator()
+        case TaxIDFormat.cl_tin:
+            return CLTINValidator()
+        case TaxIDFormat.tr_tin:
+            return TRTINValidator()
+        case TaxIDFormat.in_gst:
+            return INGSTValidator()
+        case TaxIDFormat.vn_tin:
+            return VNTINValidator()
+        case _:
+            return StdNumValidator(tax_id_type)
 
 
 def validate_tax_id(number: str, country: str) -> TaxID:
@@ -357,6 +430,9 @@ class TaxabilityReason(StrEnum):
     not_supported = "not_supported"
     """Purchases from countries where we don't support tax."""
 
+    customer_exempt = "customer_exempt"
+    """Purchases where the customer is exempt from tax, e.g. if the subscription was created before our tax registration."""
+
     @classmethod
     def from_stripe(
         cls, stripe_reason: str | None, tax_amount: int
@@ -408,12 +484,12 @@ def from_stripe_tax_rate_details(
         return None
 
     basis_points = None
-    if tax_rate_details.percentage_decimal is not None:
-        basis_points = int(float(tax_rate_details.percentage_decimal) * 100)
-
     amount = None
     amount_currency = None
-    if tax_rate_details.flat_amount is not None:
+
+    if tax_rate_details.percentage_decimal is not None:
+        basis_points = int(float(tax_rate_details.percentage_decimal) * 100)
+    elif tax_rate_details.flat_amount is not None:
         amount = tax_rate_details.flat_amount.amount
         amount_currency = tax_rate_details.flat_amount.currency
 
@@ -436,6 +512,17 @@ def from_stripe_tax_rate_details(
     }
 
 
+class TaxCode(StrEnum):
+    general_electronically_supplied_services = (
+        "general_electronically_supplied_services"
+    )
+
+    def to_stripe(self) -> str:
+        match self:
+            case TaxCode.general_electronically_supplied_services:
+                return "txcd_10000000"
+
+
 class TaxCalculation(TypedDict):
     processor_id: str
     amount: int
@@ -444,17 +531,21 @@ class TaxCalculation(TypedDict):
 
 
 async def calculate_tax(
-    identifier: uuid.UUID,
+    identifier: uuid.UUID | str,
     currency: str,
     amount: int,
-    stripe_product_id: str,
+    tax_code: TaxCode,
     address: Address,
     tax_ids: list[TaxID],
+    customer_exempt: bool,
 ) -> TaxCalculation:
     # Compute an idempotency key based on the input parameters to work as a sort of cache
     address_str = address.model_dump_json()
     tax_ids_str = ",".join(f"{tax_id[0]}:{tax_id[1]}" for tax_id in tax_ids)
-    idempotency_key_str = f"{identifier}:{currency}:{amount}:{stripe_product_id}:{address_str}:{tax_ids_str}"
+    taxability_override: Literal["customer_exempt", "none"] = (
+        "customer_exempt" if customer_exempt else "none"
+    )
+    idempotency_key_str = f"{identifier}:{currency}:{amount}:{tax_code}:{address_str}:{tax_ids_str}:{taxability_override}"
     idempotency_key = hashlib.sha256(idempotency_key_str.encode()).hexdigest()
 
     try:
@@ -463,18 +554,34 @@ async def calculate_tax(
             line_items=[
                 {
                     "amount": amount,
-                    "product": stripe_product_id,
+                    "tax_code": tax_code.to_stripe(),
                     "quantity": 1,
-                    "reference": stripe_product_id,
+                    "reference": str(identifier),
                 }
             ],
             customer_details={
                 "address": address.to_dict(),
                 "address_source": "billing",
                 "tax_ids": [to_stripe_tax_id(tax_id) for tax_id in tax_ids],
+                "taxability_override": taxability_override,
             },
             idempotency_key=idempotency_key,
         )
+    except stripe_lib.RateLimitError:
+        if settings.is_sandbox():
+            log.warning(
+                "Stripe Tax API rate limit exceeded in sandbox mode, returning zero tax",
+                identifier=str(identifier),
+                currency=currency,
+                amount=amount,
+            )
+            return {
+                "processor_id": f"taxcalc_sandbox_{uuid.uuid4().hex}",
+                "amount": 0,
+                "taxability_reason": None,
+                "tax_rate": None,
+            }
+        raise
     except stripe_lib.InvalidRequestError as e:
         if (
             e.error is not None

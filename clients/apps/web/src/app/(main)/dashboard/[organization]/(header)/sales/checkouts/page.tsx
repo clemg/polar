@@ -3,7 +3,7 @@ import { DataTableSearchParams, parseSearchParams } from '@/utils/datatable'
 import { getOrganizationBySlugOrNotFound } from '@/utils/organization'
 import { schemas } from '@polar-sh/client'
 import { Metadata } from 'next'
-import ClientPage from './ClientPage'
+import CheckoutsPage from './CheckoutsPage'
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -11,19 +11,20 @@ export async function generateMetadata(): Promise<Metadata> {
   }
 }
 
-export default async function Page({
-  params,
-  searchParams,
-}: {
-  params: { organization: string }
-  searchParams: DataTableSearchParams & {
-    product_id?: string | string[]
-    customer_id?: string
-    status?: schemas['CheckoutStatus']
-    query?: string
-  }
+export default async function Page(props: {
+  params: Promise<{ organization: string }>
+  searchParams: Promise<
+    DataTableSearchParams & {
+      product_id?: string | string[]
+      customer_id?: string
+      status?: schemas['CheckoutStatus']
+      query?: string
+    }
+  >
 }) {
-  const api = getServerSideAPI()
+  const searchParams = await props.searchParams
+  const params = await props.params
+  const api = await getServerSideAPI()
   const organization = await getOrganizationBySlugOrNotFound(
     api,
     params.organization,
@@ -42,7 +43,7 @@ export default async function Page({
     : undefined
 
   return (
-    <ClientPage
+    <CheckoutsPage
       organization={organization}
       pagination={pagination}
       sorting={sorting}

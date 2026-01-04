@@ -39,6 +39,7 @@ export const MonthWidget = ({ className }: MonthWidgetProps) => {
     interval: 'day',
     startDate,
     endDate,
+    metrics: ['orders'],
   })
 
   // Calculate weekday index for first day (Monday = 0, Sunday = 6)
@@ -61,7 +62,7 @@ export const MonthWidget = ({ className }: MonthWidgetProps) => {
   return (
     <div
       className={twMerge(
-        'dark:bg-polar-800 rounded-4xl flex w-full flex-col bg-gray-50 p-2 text-black dark:text-white',
+        'dark:bg-polar-800 flex w-full flex-col rounded-4xl bg-gray-50 p-2 text-black dark:text-white',
         className,
       )}
     >
@@ -93,11 +94,11 @@ export const MonthWidget = ({ className }: MonthWidgetProps) => {
       <div className="flex items-center justify-between px-4 pb-4">
         <div className="flex items-baseline gap-x-2">
           <h3 className="text-5xl font-light">
-            {orderMetrics.data?.totals.orders.toLocaleString('en-US', {
+            {(orderMetrics.data?.totals.orders ?? 0).toLocaleString('en-US', {
               style: 'decimal',
               compactDisplay: 'short',
               notation: 'compact',
-            }) ?? 0}
+            })}
           </h3>
           <span className="text-lg">
             {orderMetrics.data?.totals.orders === 1 ? 'Order' : 'Orders'}
@@ -144,7 +145,7 @@ export const MonthWidget = ({ className }: MonthWidgetProps) => {
                           day.orders > 0 &&
                             'dark:bg-polar-700 dark:text-polar-500 bg-gray-300 text-gray-500',
                           isToday(day.timestamp) &&
-                            'bg-blue-500 text-white dark:bg-blue-500 dark:text-white',
+                            'bg-blue dark:bg-blue text-white dark:text-white',
                           isPreviousDay && '',
                         )}
                       >
@@ -161,7 +162,7 @@ export const MonthWidget = ({ className }: MonthWidgetProps) => {
                             className={twMerge(
                               'dark:text-polar-700 relative flex h-full w-full items-center justify-center overflow-hidden rounded-full border-2 text-sm text-gray-200',
                               isToday(day.timestamp)
-                                ? 'border-blue-500'
+                                ? 'border-blue'
                                 : 'dark:border-polar-700 border-gray-200',
                             )}
                           >

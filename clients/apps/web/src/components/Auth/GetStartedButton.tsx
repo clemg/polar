@@ -1,7 +1,7 @@
 'use client'
 
 import { usePostHog } from '@/hooks/posthog'
-import { KeyboardArrowRight } from '@mui/icons-material'
+import KeyboardArrowRight from '@mui/icons-material/KeyboardArrowRight'
 import { schemas } from '@polar-sh/client'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import { ComponentProps, FormEvent, useCallback, useMemo } from 'react'
@@ -13,27 +13,29 @@ import { AuthModal } from './AuthModal'
 interface GetStartedButtonProps extends ComponentProps<typeof Button> {
   text?: string
   orgSlug?: string
-  storefrontOrg?: schemas['Organization']
+  storefrontOrg?: schemas['CustomerOrganization']
 }
 
-const GetStartedButton: React.FC<GetStartedButtonProps> = ({
+const GetStartedButton = ({
   text: _text,
   wrapperClassNames,
   orgSlug: slug,
   storefrontOrg,
   size = 'lg',
   ...props
-}) => {
+}: GetStartedButtonProps) => {
   const posthog = usePostHog()
 
   const { isShown: isModalShown, hide: hideModal, show: showModal } = useModal()
   const text = _text || 'Get Started'
 
   const signup = useMemo(() => {
-    if (!storefrontOrg) return {}
+    if (!storefrontOrg?.id) {
+      return undefined
+    }
 
     return {
-      from_storefront: storefrontOrg.id,
+      from_storefront: storefrontOrg.id as string,
     }
   }, [storefrontOrg])
 
@@ -56,12 +58,13 @@ const GetStartedButton: React.FC<GetStartedButtonProps> = ({
     <>
       <Button
         wrapperClassNames={twMerge(
-          'flex flex-row items-center gap-x-2',
+          'flex flex-row items-center gap-x-2 ',
           wrapperClassNames,
         )}
         size={size}
         onClick={onClick}
         onSubmit={onSubmit}
+        className="dark:hover:bg-polar-50 rounded-full bg-black font-medium text-white hover:bg-gray-800 dark:bg-white dark:text-black"
         {...props}
       >
         <div>{text}</div>
@@ -72,6 +75,7 @@ const GetStartedButton: React.FC<GetStartedButtonProps> = ({
       </Button>
 
       <Modal
+        title="Login"
         isShown={isModalShown}
         hide={hideModal}
         modalContent={

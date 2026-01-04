@@ -1,15 +1,8 @@
+/* global process */
 import bundleAnalyzer from '@next/bundle-analyzer'
 import createMDX from '@next/mdx'
-import mdxMetadata from '@polar-sh/mdx'
 import { withSentryConfig } from '@sentry/nextjs'
-import rehypeShikiFromHighlighter from '@shikijs/rehype/core'
-import rehypeMdxImportMedia from 'rehype-mdx-import-media'
-import rehypeSlug from 'rehype-slug'
-import remarkFlexibleToc from 'remark-flexible-toc'
-import remarkFrontmatter from 'remark-frontmatter'
-import remarkGfm from 'remark-gfm'
-import { bundledLanguages, createHighlighter } from 'shiki'
-import { themeConfig, themesList, transformers } from './shiki.config.mjs'
+import { themeConfig } from './shiki.config.mjs'
 
 const POLAR_AUTH_COOKIE_KEY =
   process.env.POLAR_AUTH_COOKIE_KEY || 'polar_session'
@@ -21,38 +14,17 @@ const defaultFrontendHostname = process.env.NEXT_PUBLIC_FRONTEND_BASE_URL
   ? new URL(process.env.NEXT_PUBLIC_FRONTEND_BASE_URL).hostname
   : 'polar.sh'
 
-const redirectDocs = (source, destination, permanent = false) => {
-  return [
-    {
-      source: `/docs${source}`,
-      destination: `/docs${destination}`,
-      permanent,
-    },
-    {
-      source: '/tools/:path*',
-      destination: '/developers/sdk/:path*',
-      has: [
-        {
-          type: 'host',
-          value: 'docs.polar.sh',
-        },
-      ],
-      permanent,
-    },
-  ]
-}
-
 const S3_PUBLIC_IMAGES_BUCKET_ORIGIN = process.env
   .S3_PUBLIC_IMAGES_BUCKET_HOSTNAME
   ? `${process.env.S3_PUBLIC_IMAGES_BUCKET_PROTOCOL || 'https'}://${process.env.S3_PUBLIC_IMAGES_BUCKET_HOSTNAME}${process.env.S3_PUBLIC_IMAGES_BUCKET_PORT ? `:${process.env.S3_PUBLIC_IMAGES_BUCKET_PORT}` : ''}`
   : ''
 const baseCSP = `
     default-src 'self';
-    connect-src 'self' ${process.env.NEXT_PUBLIC_API_URL} ${process.env.S3_UPLOAD_ORIGINS} https://api.stripe.com https://maps.googleapis.com;
-    frame-src 'self' https://*.js.stripe.com https://js.stripe.com https://hooks.stripe.com;
-    script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.js.stripe.com https://js.stripe.com https://maps.googleapis.com;
-    style-src 'self' 'unsafe-inline';
-    img-src 'self' blob: data: https://www.gravatar.com https://avatars.githubusercontent.com ${S3_PUBLIC_IMAGES_BUCKET_ORIGIN};
+    connect-src 'self' ${process.env.NEXT_PUBLIC_API_URL} ${process.env.S3_UPLOAD_ORIGINS} https://api.stripe.com https://maps.googleapis.com https://*.google-analytics.com https://chat.uk.plain.com https://prod-uk-services-attachm-attachmentsuploadbucket2-1l2e4906o2asm.s3.eu-west-2.amazonaws.com;
+    frame-src 'self' https://*.js.stripe.com https://js.stripe.com https://hooks.stripe.com https://customer-wl21dabnj6qtvcai.cloudflarestream.com videodelivery.net *.cloudflarestream.com;
+    script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.js.stripe.com https://js.stripe.com https://maps.googleapis.com https://www.googletagmanager.com https://chat.cdn-plain.com https://embed.cloudflarestream.com;
+    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+    img-src 'self' blob: data: https://www.gravatar.com https://img.logo.dev https://lh3.googleusercontent.com https://avatars.githubusercontent.com ${S3_PUBLIC_IMAGES_BUCKET_ORIGIN} https://prod-uk-services-workspac-workspacefilespublicbuck-vs4gjqpqjkh6.s3.amazonaws.com https://prod-uk-services-attachm-attachmentsbucket28b3ccf-uwfssb4vt2us.s3.eu-west-2.amazonaws.com https://i0.wp.com;
     font-src 'self';
     object-src 'none';
     base-uri 'self';
@@ -75,15 +47,39 @@ const oauth2CSP = `
   frame-ancestors 'none';
 `
 
+// We rewrite Mintlify docs to polar.sh/docs, so we need a specific CSP for them
+// Ref: https://www.mintlify.com/docs/guides/csp-configuration#content-security-policy-csp-configuration
+const docsCSP = `
+  default-src 'self';
+  script-src 'self' 'unsafe-inline' 'unsafe-eval' cdn.jsdelivr.net www.googletagmanager.com cdn.segment.com plausible.io
+  us.posthog.com tag.clearbitscripts.com cdn.heapanalytics.com chat.cdn-plain.com chat-assets.frontapp.com
+  browser.sentry-cdn.com js.sentry-cdn.com;
+  style-src 'self' 'unsafe-inline' d4tuoctqmanu0.cloudfront.net fonts.googleapis.com;
+  font-src 'self' d4tuoctqmanu0.cloudfront.net fonts.googleapis.com;
+  img-src 'self' data: blob: d3gk2c5xim1je2.cloudfront.net mintcdn.com *.mintcdn.com cdn.jsdelivr.net mintlify.s3.us-west-1.amazonaws.com;
+  connect-src 'self' *.mintlify.dev *.mintlify.com d1ctpt7j8wusba.cloudfront.net mintcdn.com *.mintcdn.com
+  api.mintlifytrieve.com www.googletagmanager.com cdn.segment.com plausible.io us.posthog.com browser.sentry-cdn.com;
+  frame-src 'self' *.mintlify.dev https://polar-public-assets.s3.us-east-2.amazonaws.com;
+`
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  swcMinify: true,
   transpilePackages: ['shiki'],
   pageExtensions: ['js', 'jsx', 'md', 'mdx', 'ts', 'tsx'],
 
   // This is required to support PostHog trailing slash API requests
   skipTrailingSlashRedirect: true,
+
+  webpack: (config, { dev }) => {
+    if (config.cache && !dev) {
+      config.cache = Object.freeze({
+        type: 'memory',
+      })
+    }
+
+    return config
+  },
 
   // Since Codespaces run behind a proxy, we need to allow it for Server-Side Actions, like cache revalidation
   // See: https://github.com/vercel/next.js/issues/58019
@@ -134,34 +130,22 @@ const nextConfig = {
   },
 
   async rewrites() {
-    return {
-      beforeFiles: [
-        // PostHog Rewrite
-        {
-          source: '/ingest/static/:path*',
-          destination: 'https://us-assets.i.posthog.com/static/:path*',
-        },
-        {
-          source: '/ingest/:path*',
-          destination: 'https://us.i.posthog.com/:path*',
-        },
-
-        // docs.polar.sh rewrite
-        {
-          // The rewrite happens before everything else, so we need to make sure
-          // it doesn't match the _next and assets directories
-          source: '/:path((?!_next|assets).*)',
-          has: [
-            {
-              type: 'host',
-              value: 'docs.polar.sh',
-            },
-          ],
-          destination: '/docs/:path',
-        },
-      ],
-    }
+    return [
+      {
+        source: '/ingest/static/:path*',
+        destination: 'https://us-assets.i.posthog.com/static/:path*',
+      },
+      {
+        source: '/ingest/:path*',
+        destination: 'https://us.i.posthog.com/:path*',
+      },
+      {
+        source: '/ingest/decide',
+        destination: 'https://us.i.posthog.com/decide',
+      },
+    ]
   },
+
   async redirects() {
     return [
       // dashboard.polar.sh redirections
@@ -214,33 +198,14 @@ const nextConfig = {
         ],
         permanent: false,
       },
-
-      // Feature pages
       {
-        source: '/products',
-        destination: 'https://docs.polar.sh/products',
-        has: [
-          {
-            type: 'host',
-            value: 'polar.sh',
-          },
-        ],
-        permanent: true,
-      },
-      {
-        source: '/issue-funding',
-        destination: 'https://docs.polar.sh/issue-funding',
-        has: [
-          {
-            type: 'host',
-            value: 'polar.sh',
-          },
-        ],
-        permanent: true,
+        source: '/careers',
+        destination: 'https://polar.sh/company',
+        permanent: false,
       },
       {
         source: '/llms.txt',
-        destination: 'https://docs.polar.sh/llms.txt',
+        destination: 'https://polar.sh/docs/llms.txt',
         permanent: true,
         has: [
           {
@@ -251,7 +216,7 @@ const nextConfig = {
       },
       {
         source: '/llms-full.txt',
-        destination: 'https://docs.polar.sh/llms-full.txt',
+        destination: 'https://polar.sh/docs/llms-full.txt',
         permanent: true,
         has: [
           {
@@ -260,62 +225,6 @@ const nextConfig = {
           },
         ],
       },
-      {
-        source: '/donations',
-        destination: 'https://docs.polar.sh/donations',
-        has: [
-          {
-            type: 'host',
-            value: 'polar.sh',
-          },
-        ],
-        permanent: true,
-      },
-
-      ...redirectDocs('/issue-funding/overview', '/issue-funding', true),
-      ...redirectDocs('/guides/:path*', '/developers/guides/:path*', true),
-      ...redirectDocs('/tools/:path*', '/developers/sdk/:path*', true),
-      ...redirectDocs('/contribute', '/developers/open-source', true),
-      ...redirectDocs('/sandbox', '/developers/sandbox', true),
-      ...redirectDocs(
-        '/api/webhooks/:path*',
-        '/developers/webhooks/:path*',
-        true,
-      ),
-      ...redirectDocs('/api/sdk/:path*', '/developers/sdk/:path*', true),
-
-      // Redirect /docs/overview/:path to /docs/:path
-      ...redirectDocs('/overview/:path*', '/:path*', true),
-      ...redirectDocs('/subscriptions', '/products', true),
-      ...redirectDocs('/support/faq', '/', true),
-
-      // Redirect old FAQ to docs.polar.sh
-      ...(ENVIRONMENT === 'production'
-        ? [
-            {
-              source: '/faq',
-              destination: 'https://docs.polar.sh/faq/overview',
-              has: [
-                {
-                  type: 'host',
-                  value: 'polar.sh',
-                },
-              ],
-              permanent: true,
-            },
-            {
-              source: '/faq/:path*',
-              destination: 'https://docs.polar.sh/faq/:path*',
-              has: [
-                {
-                  type: 'host',
-                  value: 'polar.sh',
-                },
-              ],
-              permanent: true,
-            },
-          ]
-        : []),
 
       // Logged-in user redirections
       {
@@ -352,17 +261,6 @@ const nextConfig = {
         permanent: false,
       },
 
-      // Redirect /docs to docs.polar.sh
-      ...(ENVIRONMENT === 'production'
-        ? [
-            {
-              source: '/docs/:path*',
-              destination: 'https://docs.polar.sh/:path*',
-              permanent: false,
-            },
-          ]
-        : []),
-
       {
         source: '/maintainer',
         destination: '/dashboard',
@@ -384,8 +282,8 @@ const nextConfig = {
         permanent: true,
       },
       {
-        source: '/dashboard/:organization/products/benefits',
-        destination: '/dashboard/:organization/benefits',
+        source: '/dashboard/:organization/benefits',
+        destination: '/dashboard/:organization/products/benefits',
         permanent: true,
       },
       {
@@ -412,6 +310,26 @@ const nextConfig = {
         source: '/dashboard/:organization/finance',
         destination: '/dashboard/:organization/finance/income',
         permanent: false,
+      },
+      {
+        source: '/dashboard/:organization/usage-billing',
+        destination: '/dashboard/:organization/products/meters',
+        permanent: true,
+      },
+      {
+        source: '/dashboard/:organization/usage-billing/meters',
+        destination: '/dashboard/:organization/products/meters',
+        permanent: true,
+      },
+      {
+        source: '/dashboard/:organization/usage-billing/events',
+        destination: '/dashboard/:organization/analytics/events',
+        permanent: true,
+      },
+      {
+        source: '/dashboard/:organization/usage-billing/spans',
+        destination: '/dashboard/:organization/analytics/costs',
+        permanent: true,
       },
 
       // Account Settings Redirects
@@ -455,24 +373,34 @@ const nextConfig = {
     ]
   },
   async headers() {
+    const baseHeaders = [
+      {
+        key: 'Content-Security-Policy',
+        value: nonEmbeddedCSP.replace(/\n/g, ''),
+      },
+      {
+        key: 'Permissions-Policy',
+        value:
+          'payment=(), publickey-credentials-get=(), camera=(), microphone=(), geolocation=()',
+      },
+      {
+        key: 'X-Frame-Options',
+        value: 'DENY',
+      },
+    ]
+
+    // Add X-Robots-Tag header for sandbox environment
+    if (ENVIRONMENT === 'sandbox') {
+      baseHeaders.push({
+        key: 'X-Robots-Tag',
+        value: 'noindex, nofollow, noarchive, nosnippet, noimageindex',
+      })
+    }
+
     return [
       {
-        source: '/((?!checkout|oauth2).*)',
-        headers: [
-          {
-            key: 'Content-Security-Policy',
-            value: nonEmbeddedCSP.replace(/\n/g, ''),
-          },
-          {
-            key: 'Permissions-Policy',
-            value:
-              'payment=(), publickey-credentials-get=(), camera=(), microphone=(), geolocation=()',
-          },
-          {
-            key: 'X-Frame-Options',
-            value: 'DENY',
-          },
-        ],
+        source: '/((?!checkout|oauth2|docs).*)',
+        headers: baseHeaders,
       },
       {
         source: '/oauth2/:path*',
@@ -490,6 +418,15 @@ const nextConfig = {
             key: 'X-Frame-Options',
             value: 'DENY',
           },
+          ...(ENVIRONMENT === 'sandbox'
+            ? [
+                {
+                  key: 'X-Robots-Tag',
+                  value:
+                    'noindex, nofollow, noarchive, nosnippet, noimageindex',
+                },
+              ]
+            : []),
         ],
       },
       {
@@ -503,6 +440,42 @@ const nextConfig = {
             key: 'Permissions-Policy',
             value: `payment=*, publickey-credentials-get=*, camera=(), microphone=(), geolocation=()`,
           },
+          ...(ENVIRONMENT === 'sandbox'
+            ? [
+                {
+                  key: 'X-Robots-Tag',
+                  value:
+                    'noindex, nofollow, noarchive, nosnippet, noimageindex',
+                },
+              ]
+            : []),
+        ],
+      },
+      {
+        source: '/docs/:path*',
+        headers: [
+          {
+            key: 'Content-Security-Policy',
+            value: docsCSP.replace(/\n/g, ''),
+          },
+          {
+            key: 'Permissions-Policy',
+            value:
+              'payment=(), publickey-credentials-get=(), camera=(), microphone=(), geolocation=()',
+          },
+          {
+            key: 'X-Frame-Options',
+            value: 'DENY',
+          },
+          ...(ENVIRONMENT === 'sandbox'
+            ? [
+                {
+                  key: 'X-Robots-Tag',
+                  value:
+                    'noindex, nofollow, noarchive, nosnippet, noimageindex',
+                },
+              ]
+            : []),
         ],
       },
     ]
@@ -510,42 +483,16 @@ const nextConfig = {
 }
 
 const createConfig = async () => {
-  const highlighter = await createHighlighter({
-    langs: Object.keys(bundledLanguages),
-    themes: themesList,
-  })
   const withMDX = createMDX({
     options: {
-      remarkPlugins: [
-        remarkFrontmatter,
-        // Automatically turns frontmatter into NextJS Metadata
-        // Also automatically generates an OpenGraph image URL
-        mdxMetadata(`${process.env.NEXT_PUBLIC_FRONTEND_BASE_URL}/docs/og`),
-        remarkGfm,
-        remarkFlexibleToc,
-        () => (tree, file) => ({
-          ...tree,
-          children: [
-            // Wrap the main content of the MDX file in a BodyWrapper (div) component
-            // so we might position the TOC on the right side of the content
-            {
-              type: 'mdxJsxFlowElement',
-              name: 'BodyWrapper',
-              attributes: [],
-              children: tree.children,
-            },
-          ],
-        }),
-      ],
+      remarkPlugins: ['remark-frontmatter', 'remark-gfm'],
       rehypePlugins: [
-        rehypeMdxImportMedia,
-        rehypeSlug,
+        'rehype-mdx-import-media',
+        'rehype-slug',
         [
-          rehypeShikiFromHighlighter,
-          highlighter,
+          '@shikijs/rehype',
           {
             themes: themeConfig,
-            transformers,
           },
         ],
       ],

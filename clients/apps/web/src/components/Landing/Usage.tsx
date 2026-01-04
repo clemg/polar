@@ -1,6 +1,7 @@
 'use client'
 
-import { ArrowOutwardOutlined, Check } from '@mui/icons-material'
+import ArrowOutwardOutlined from '@mui/icons-material/ArrowOutwardOutlined'
+import Check from '@mui/icons-material/Check'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import {
   Tabs,
@@ -9,6 +10,7 @@ import {
   TabsTrigger,
 } from '@polar-sh/ui/components/atoms/Tabs'
 import { motion } from 'framer-motion'
+import Image from 'next/image'
 import Link from 'next/link'
 import { useMemo } from 'react'
 import {
@@ -49,7 +51,7 @@ export async function POST(req: Request) {
 
   return Response.json({ text });
 }`,
-    link: 'https://docs.polar.sh/features/usage-based-billing/ingestion-strategies/llm-strategy',
+    link: 'https://polar.sh/docs/features/usage-based-billing/ingestion-strategies/llm-strategy',
   },
   {
     name: 'Delta Time',
@@ -81,10 +83,10 @@ export async function GET(request: Request) {
 
   return Response.json({ delta });
 }`,
-    link: 'https://docs.polar.sh/features/usage-based-billing/ingestion-strategies/delta-time-strategy',
+    link: 'https://polar.sh/docs/features/usage-based-billing/ingestion-strategies/delta-time-strategy',
   },
   {
-    name: 'Manual',
+    name: 'Custom Ingestion',
     description:
       'Manually ingest data from your application to bill your customers',
     bullets: [
@@ -125,7 +127,7 @@ const itemVariants = {
 
 export const Usage = () => {
   const tabsTriggerClassName = useMemo(() => {
-    return '!rounded-full px-4 py-2 data-[state=active]:bg-white hidden md:flex'
+    return 'rounded-full! px-4 py-2 data-[state=active]:bg-white hidden md:flex'
   }, [])
 
   return (
@@ -136,7 +138,7 @@ export const Usage = () => {
             <span className="dark:text-polar-500 text-lg text-gray-400">
               Ingestion Based Billing
             </span>
-            <h1 className="w-fit max-w-3xl text-pretty text-center text-3xl md:text-5xl md:leading-normal">
+            <h1 className="w-fit max-w-3xl text-center text-3xl text-pretty md:text-5xl md:leading-normal">
               Usage Based Billing on Autopilot with Ingestion Strategies
             </h1>
             <TabsList>
@@ -150,7 +152,7 @@ export const Usage = () => {
                 </TabsTrigger>
               ))}
               <Link
-                href="https://docs.polar.sh/features/usage-based-billing/ingestion-strategies/ingestion-strategy"
+                href="https://polar.sh/docs/features/usage-based-billing/ingestion-strategies/ingestion-strategy"
                 target="_blank"
               >
                 <Button className="rounded-full" variant="ghost">
@@ -163,7 +165,7 @@ export const Usage = () => {
           {strategies.map((strategy) => (
             <TabsContent value={strategy.name} key={strategy.name}>
               <motion.div
-                className={`dark:bg-polar-900 flex w-full flex-col overflow-hidden rounded-2xl bg-white md:flex-row`}
+                className={`dark:bg-polar-900 flex w-full flex-col overflow-hidden rounded-2xl bg-white md:flex-row md:rounded-4xl`}
                 variants={containerVariants}
                 initial="hidden"
                 whileInView="visible"
@@ -172,13 +174,13 @@ export const Usage = () => {
                 <div className="flex flex-col justify-center gap-y-8 p-8 md:w-1/2 md:p-16">
                   <div className="flex flex-col gap-y-8">
                     <motion.h2
-                      className="text-2xl !leading-normal md:text-4xl"
+                      className="text-2xl leading-normal! md:text-4xl"
                       variants={itemVariants}
                     >
                       {strategy.name} Strategy
                     </motion.h2>
                     <motion.p
-                      className="text-pretty text-lg leading-relaxed"
+                      className="text-lg leading-relaxed text-pretty"
                       variants={itemVariants}
                     >
                       {strategy.description}
@@ -194,7 +196,7 @@ export const Usage = () => {
                             className="text-emerald-500"
                             fontSize="small"
                           />
-                          <p className="text-pretty leading-relaxed">
+                          <p className="leading-relaxed text-pretty">
                             {bullet}
                           </p>
                         </motion.li>
@@ -217,15 +219,16 @@ export const Usage = () => {
                   </div>
                 </div>
 
-                <div
-                  className="dark:bg-polar-800 flex flex-col justify-center bg-gray-100 p-8 text-sm md:w-1/2 md:p-16"
-                  style={{
-                    backgroundImage: 'url(/assets/landing/abstract_02.jpg)',
-                    backgroundSize: 'cover',
-                    backgroundPosition: 'center',
-                  }}
-                >
-                  <div className="dark:bg-polar-900 rounded-lg bg-white p-4">
+                <div className="dark:bg-polar-800 relative flex flex-col justify-center bg-gray-100 p-4 text-sm md:w-1/2 xl:p-12">
+                  <Image
+                    className="absolute inset-0 h-full w-full object-cover"
+                    src="/assets/landing/abstract_02.jpg"
+                    fill
+                    sizes="(max-width: 768px) 100vw, (max-width: 1280px) 75vw, 640px"
+                    loading="lazy"
+                    alt=""
+                  />
+                  <div className="dark:bg-polar-900 z-1 rounded-lg bg-white p-4">
                     <SyntaxHighlighterClient
                       lang="typescript"
                       code={strategy.code}

@@ -1,7 +1,7 @@
 import { getServerSideAPI } from '@/utils/client/serverside'
 import { getOrganizationBySlugOrNotFound } from '@/utils/organization'
 import { Metadata } from 'next'
-import ClientPage from './ClientPage'
+import WebhooksPage from './WebhooksPage'
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -9,16 +9,15 @@ export async function generateMetadata(): Promise<Metadata> {
   }
 }
 
-export default async function Page({
-  params,
-}: {
-  params: { organization: string }
+export default async function Page(props: {
+  params: Promise<{ organization: string }>
 }) {
-  const api = getServerSideAPI()
+  const params = await props.params
+  const api = await getServerSideAPI()
   const organization = await getOrganizationBySlugOrNotFound(
     api,
     params.organization,
   )
 
-  return <ClientPage organization={organization} />
+  return <WebhooksPage organization={organization} />
 }

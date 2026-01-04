@@ -1,10 +1,12 @@
 from enum import StrEnum
 from typing import Annotated, Any
 
+from annotated_types import Ge, Le, MaxLen
 from pydantic import AfterValidator, BaseModel, ConfigDict
 from sqlalchemy import (
     ColumnExpressionArgument,
     Dialect,
+    String,
     TypeDecorator,
     and_,
     case,
@@ -14,6 +16,13 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+
+# PostgreSQL int4 range limits
+INT_MIN_VALUE = -2_147_483_648
+INT_MAX_VALUE = 2_147_483_647
+
+# String length limit for filtering values
+MAX_STRING_LENGTH = 1000
 
 
 class FilterOperator(StrEnum):
@@ -35,13 +44,22 @@ def _strip_metadata_prefix(value: str) -> str:
 class FilterClause(BaseModel):
     property: Annotated[str, AfterValidator(_strip_metadata_prefix)]
     operator: FilterOperator
-    value: str | int | bool
+    value: (
+        Annotated[str, MaxLen(MAX_STRING_LENGTH)]
+        | Annotated[int, Ge(INT_MIN_VALUE), Le(INT_MAX_VALUE)]
+        | bool
+    )
 
     def get_sql_clause(self, model: type[Any]) -> ColumnExpressionArgument[bool]:
         if self.property in model._filterable_fields:
             allowed_type, attr = model._filterable_fields[self.property]
             if not isinstance(self.value, allowed_type):
                 return false()
+            # The operator is LIKE OR NOT LIKE, treat the attribute as a string
+            if self.operator in (FilterOperator.like, FilterOperator.not_like):
+                if allowed_type is not str:
+                    attr = func.cast(attr, String)
+                return self._get_comparison_clause(attr, self._get_str_value())
             return self._get_comparison_clause(attr, self.value)
 
         attr = model.user_metadata[self.property]
@@ -59,9 +77,9 @@ class FilterClause(BaseModel):
             # The property is a number
             (
                 func.jsonb_typeof(attr) == "number",
-                # Compare it with the value if it's an integer
-                self._get_comparison_clause(attr.as_integer(), self._get_number_value())
-                if isinstance(self.value, int)
+                # Compare it with the value if it's a number
+                self._get_comparison_clause(attr.as_float(), self._get_number_value())
+                if isinstance(self.value, int | float)
                 # Otherwise return false
                 else false(),
             ),

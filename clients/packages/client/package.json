@@ -6,10 +6,17 @@
   "type": "module",
   "private": true,
   "version": "0.0.0",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "generate": "openapi-typescript http://127.0.0.1:8000/openapi.json --enum-values -o ./src/v1.ts && pnpm run build",
+    "generate": "openapi-typescript http://127.0.0.1:8000/openapi.json --enum-values -o ./src/v1.ts && prettier --write ./src && pnpm run build",
     "test:ts": "tsc --noEmit",
-    "build": "rm -rf dist/ && tsup"
+    "build": "rm -rf dist/ && tsup",
+    "lint": "prettier -c ."
   },
   "exports": {
     ".": {
@@ -18,16 +25,16 @@
     }
   },
   "devDependencies": {
-    "openapi-typescript": "^7.8.0",
-    "tsconfig": "workspace:*",
-    "tsup": "^8.4.0",
+    "openapi-typescript": "^7.10.1",
+    "@polar-sh/typescript-config": "workspace:*",
+    "tsup": "^8.5.1",
     "typescript": "latest"
   },
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
-    "openapi-fetch": "^0.13.4",
+    "openapi-fetch": "^0.15.0",
     "openapi-typescript-helpers": "^0.0.15"
   }
 }

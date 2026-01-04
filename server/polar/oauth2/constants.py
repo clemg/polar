@@ -14,6 +14,7 @@ REFRESH_TOKEN_PREFIX: dict[SubType, str] = {
     SubType.user: "polar_rt_u_",
     SubType.organization: "polar_rt_o_",
 }
+WEBHOOK_SECRET_PREFIX = "polar_whs_"
 
 ISSUER = "https://polar.sh"
 SERVICE_DOCUMENTATION = "https://polar.sh/docs"
@@ -27,3 +28,7 @@ JWT_CONFIG = {
     "iss": ISSUER,
     "exp": 3600,
 }
+
+
+def is_registration_token_prefix(value: str) -> bool:
+    return value.startswith(CLIENT_REGISTRATION_TOKEN_PREFIX)

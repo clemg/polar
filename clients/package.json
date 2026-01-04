@@ -6,29 +6,32 @@
     "dev": "turbo watch dev",
     "dev-web": "turbo run dev --filter=web",
     "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "storybook": "turbo watch storybook",
     "generate": "pnpm -C packages/client generate",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "preinstall": "npx only-allow pnpm",
-    "postinstall": "manypkg check",
     "release-packages": "turbo run build lint test --filter='./packages/*' && changeset publish"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.29.2",
-    "@manypkg/cli": "^0.23.0",
-    "eslint": "^8.57.1",
-    "eslint-config-custom": "workspace:*",
-    "only-allow": "1.2.1",
-    "prettier": "^3.5.3",
-    "prettier-plugin-organize-imports": "^4.1.0",
-    "prettier-plugin-tailwindcss": "^0.6.11",
-    "turbo": "^2.5.0"
+    "@changesets/cli": "^2.29.8",
+    "@manypkg/cli": "^0.25.1",
+    "only-allow": "1.2.2",
+    "prettier": "^3.7.4",
+    "prettier-plugin-organize-imports": "^4.3.0",
+    "prettier-plugin-tailwindcss": "^0.7.2",
+    "turbo": "^2.6.3"
   },
   "resolutions": {
     "sharp": "0.33.3"
   },
-  "packageManager": "pnpm@10.5.2",
+  "pnpm": {
+    "overrides": {
+      "@types/react": "19.2.3",
+      "@types/react-dom": "19.2.3"
+    }
+  },
+  "packageManager": "pnpm@10.24.0",
   "manypkg": {
     "ignoredRules": [
       "INTERNAL_MISMATCH"

@@ -1,6 +1,7 @@
 import { useMetrics } from '@/hooks/queries'
 import { OrganizationContext } from '@/providers/maintainerOrganization'
-import { KeyboardArrowDown, KeyboardArrowUp } from '@mui/icons-material'
+import KeyboardArrowDown from '@mui/icons-material/KeyboardArrowDown'
+import KeyboardArrowUp from '@mui/icons-material/KeyboardArrowUp'
 import { Card } from '@polar-sh/ui/components/atoms/Card'
 import {
   Tooltip,
@@ -27,10 +28,12 @@ const RevenueWidget = ({ className, productId }: RevenueWidgetProps) => {
     organization_id: organization.id,
     interval: 'month',
     product_id: productId ? [productId] : undefined,
+    metrics: ['revenue'],
   })
 
   const maxRevenue = Math.max(
-    ...(revenueMetrics.data?.periods.map((period) => period.revenue) ?? []),
+    ...(revenueMetrics.data?.periods.map((period) => period.revenue ?? 0) ??
+      []),
   )
 
   return (
@@ -73,13 +76,7 @@ const RevenueWidget = ({ className, productId }: RevenueWidgetProps) => {
               className="flex h-full flex-col gap-y-2"
             >
               <Tooltip>
-                <TooltipTrigger
-                  className={twMerge(
-                    'relative h-full min-h-48 overflow-hidden rounded-2xl',
-                    'bg-[repeating-linear-gradient(45deg,rgba(0,0,0,0.04),rgba(0,0,0,0.04)_10px,transparent_10px,transparent_20px)]',
-                    'dark:bg-[repeating-linear-gradient(45deg,rgba(255,255,255,0.03),rgba(255,255,255,0.03)_10px,transparent_10px,transparent_20px)]',
-                  )}
-                >
+                <TooltipTrigger className="relative h-full min-h-48 overflow-hidden rounded-2xl bg-[repeating-linear-gradient(-45deg,rgba(0,0,0,0.05),rgba(0,0,0,0.05)_2px,transparent_2px,transparent_8px)] dark:bg-[repeating-linear-gradient(45deg,rgba(255,255,255,0.03),rgba(255,255,255,0.03)_2px,transparent_2px,transparent_8px)]">
                   {revenueMetrics.isLoading ? (
                     <div className="dark:bg-polar-700 flex h-full w-full items-center justify-center rounded-2xl bg-gray-200">
                       <Spinner />
@@ -93,14 +90,14 @@ const RevenueWidget = ({ className, productId }: RevenueWidgetProps) => {
                           : 'dark:bg-polar-600 bg-gray-300',
                       )}
                       style={{
-                        height: `${(period.revenue / maxRevenue) * 100}%`,
+                        height: `${((period.revenue ?? 0) / maxRevenue) * 100}%`,
                       }}
                     />
                   )}
                 </TooltipTrigger>
                 <TooltipContent>
                   <span>
-                    {formatCurrencyAndAmount(period.revenue, 'usd', 0)} in{' '}
+                    {formatCurrencyAndAmount(period.revenue ?? 0, 'usd', 0)} in{' '}
                     {format(period.timestamp, 'MMMM')}
                   </span>
                 </TooltipContent>
@@ -112,7 +109,7 @@ const RevenueWidget = ({ className, productId }: RevenueWidgetProps) => {
                 <div className="flex flex-row items-center justify-between gap-x-2">
                   <span className="dark:text-polar-500 text-sm text-gray-500">
                     $
-                    {(period.revenue / 100).toLocaleString('en-US', {
+                    {((period.revenue ?? 0) / 100).toLocaleString('en-US', {
                       style: 'decimal',
                       compactDisplay: 'short',
                       notation: 'compact',
@@ -122,7 +119,7 @@ const RevenueWidget = ({ className, productId }: RevenueWidgetProps) => {
                     <Tooltip>
                       <TooltipTrigger
                         className={twMerge(
-                          'flex flex-row items-center gap-x-1 rounded-sm p-0.5 text-xs',
+                          'flex flex-row items-center gap-x-1 rounded-xs p-0.5 text-xs',
                           isTrendingUp
                             ? 'bg-emerald-100 text-emerald-500 dark:bg-emerald-950'
                             : 'bg-red-100 text-red-500 dark:bg-red-950',

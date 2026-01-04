@@ -1,12 +1,11 @@
 import uuid
 from collections.abc import Sequence
-from typing import Any
 
 from pydantic import BaseModel
-from sqlalchemy import UnaryExpression, asc, delete, desc
+from sqlalchemy import case, delete
 
 from polar.auth.models import AuthSubject
-from polar.exceptions import NotPermitted, PolarError, PolarRequestValidationError
+from polar.exceptions import NotPermitted, PolarRequestValidationError
 from polar.kit.db.postgres import AsyncSession
 from polar.kit.metadata import MetadataQuery, apply_metadata_clause
 from polar.kit.pagination import PaginationParams
@@ -26,9 +25,6 @@ from .schemas import BenefitCreate, BenefitUpdate
 from .sorting import BenefitSortProperty
 
 
-class BenefitError(PolarError): ...
-
-
 class BenefitService:
     async def list(
         self,
@@ -37,6 +33,8 @@ class BenefitService:
         *,
         type: Sequence[BenefitType] | None = None,
         organization_id: Sequence[uuid.UUID] | None = None,
+        id_in: Sequence[uuid.UUID] | None = None,
+        id_not_in: Sequence[uuid.UUID] | None = None,
         metadata: MetadataQuery | None = None,
         pagination: PaginationParams,
         sorting: list[Sorting[BenefitSortProperty]] = [
@@ -53,20 +51,38 @@ class BenefitService:
         if organization_id is not None:
             statement = statement.where(Benefit.organization_id.in_(organization_id))
 
+        if id_in is not None:
+            statement = statement.where(Benefit.id.in_(id_in))
+
+        if id_not_in is not None:
+            statement = statement.where(Benefit.id.notin_(id_not_in))
+
         if query is not None:
             statement = statement.where(Benefit.description.ilike(f"%{query}%"))
 
         if metadata is not None:
             statement = apply_metadata_clause(Benefit, statement, metadata)
 
-        order_by_clauses: list[UnaryExpression[Any]] = []
-        for criterion, is_desc in sorting:
-            clause_function = desc if is_desc else asc
-            if criterion == BenefitSortProperty.created_at:
-                order_by_clauses.append(clause_function(Benefit.created_at))
-            elif criterion == BenefitSortProperty.description:
-                order_by_clauses.append(clause_function(Benefit.description))
-        statement = statement.order_by(*order_by_clauses)
+        user_order_sorting = [
+            s for s in sorting if s[0] == BenefitSortProperty.user_order
+        ]
+        other_sorting: list[Sorting[BenefitSortProperty]] = [
+            s for s in sorting if s[0] != BenefitSortProperty.user_order
+        ]
+
+        if user_order_sorting and id_in:
+            order_cases = {benefit_id: idx for idx, benefit_id in enumerate(id_in)}
+            case_expression = case(order_cases, value=Benefit.id)
+            _, is_desc = user_order_sorting[0]
+            if is_desc:
+                statement = statement.order_by(case_expression.desc())
+            else:
+                statement = statement.order_by(case_expression)
+
+        if other_sorting:
+            statement = repository.apply_sorting(statement, other_sorting)
+        elif not user_order_sorting:
+            statement = repository.apply_sorting(statement, sorting)
 
         return await repository.paginate(
             statement, limit=pagination.limit, page=pagination.page

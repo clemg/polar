@@ -84,7 +84,7 @@ export const LicenseKeysPage = ({
         : updaterOrValue
 
     router.push(
-      `/dashboard/${organization.slug}/benefits?benefitId=${benefit.id}&${getSearchParams(
+      `/dashboard/${organization.slug}/products/benefits/${benefit.id}?${getSearchParams(
         updatedPagination,
         sorting,
       )}`,
@@ -102,7 +102,7 @@ export const LicenseKeysPage = ({
         : updaterOrValue
 
     router.push(
-      `/dashboard/${organization.slug}/benefits?benefitId=${benefit.id}&${getSearchParams(
+      `/dashboard/${organization.slug}/products/benefits/${benefit.id}?${getSearchParams(
         pagination,
         updatedSorting,
       )}`,
@@ -216,6 +216,7 @@ export const LicenseKeysPage = ({
           <h2 className="text-xl">License Keys</h2>
           <LicenseKeysList
             isLoading={isLoading}
+            rowCount={licenseKeys?.pagination.total_count ?? 0}
             pageCount={licenseKeys?.pagination.max_page ?? 1}
             licenseKeys={licenseKeys?.items ?? []}
             pagination={pagination}

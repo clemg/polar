@@ -9,9 +9,9 @@ from polar.exceptions import PolarError
 from polar.kit.pagination import PaginationParams
 from polar.kit.sorting import Sorting
 from polar.kit.utils import generate_uuid
-from polar.models import Checkout, Order, Payment
+from polar.models import Checkout, Order, Payment, Wallet
 from polar.models.payment import PaymentStatus
-from polar.postgres import AsyncSession
+from polar.postgres import AsyncReadSession, AsyncSession
 
 from .repository import PaymentRepository
 from .sorting import PaymentSortProperty
@@ -43,7 +43,7 @@ class UnhandledPaymentIntent(PaymentError):
 class PaymentService:
     async def list(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         *,
         organization_id: Sequence[uuid.UUID] | None = None,
@@ -86,7 +86,7 @@ class PaymentService:
 
     async def get(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         id: uuid.UUID,
     ) -> Payment | None:
@@ -101,6 +101,7 @@ class PaymentService:
         session: AsyncSession,
         charge: stripe_lib.Charge,
         checkout: Checkout | None,
+        wallet: Wallet | None,
         order: Order | None,
     ) -> Payment:
         repository = PaymentRepository.from_session(session)
@@ -140,9 +141,12 @@ class PaymentService:
 
         payment.checkout = checkout
         payment.order = order
+        payment.wallet = wallet
 
         if checkout is not None:
             payment.organization = checkout.organization
+        elif wallet is not None:
+            payment.organization = wallet.organization
         elif order is not None:
             payment.organization = order.organization
         else:
@@ -150,7 +154,7 @@ class PaymentService:
 
         return await repository.update(payment)
 
-    async def create_from_stripe_payment_intent(
+    async def upsert_from_stripe_payment_intent(
         self,
         session: AsyncSession,
         payment_intent: stripe_lib.PaymentIntent,
@@ -167,9 +171,18 @@ class PaymentService:
         ):
             raise UnhandledPaymentIntent(payment_intent.id)
 
-        payment = Payment(processor_id=payment_intent.id)
+        repository = PaymentRepository.from_session(session)
 
-        payment.processor = PaymentProcessor.stripe
+        payment = await repository.get_by_processor_id(
+            PaymentProcessor.stripe, payment_intent.id
+        )
+        if payment is None:
+            payment = Payment(
+                id=generate_uuid(),
+                processor=PaymentProcessor.stripe,
+                processor_id=payment_intent.id,
+            )
+
         payment.status = PaymentStatus.failed
         payment.amount = payment_intent.amount
         payment.currency = payment_intent.currency
@@ -181,7 +194,7 @@ class PaymentService:
         payment.method_metadata = dict(payment_method[payment_method.type])
         payment.customer_email = payment_intent.receipt_email
 
-        payment.decline_reason = payment_error.code
+        payment.decline_reason = getattr(payment_error, "code", None)
         payment.decline_message = payment_error.message
 
         payment.checkout = checkout
@@ -194,8 +207,7 @@ class PaymentService:
         else:
             raise UnlinkedPaymentError(payment_intent.id)
 
-        repository = PaymentRepository.from_session(session)
-        return await repository.create(payment)
+        return await repository.update(payment)
 
 
 payment = PaymentService()

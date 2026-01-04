@@ -2,7 +2,7 @@ import { getServerSideAPI } from '@/utils/client/serverside'
 import { getOrganizationBySlugOrNotFound } from '@/utils/organization'
 import { getSubscriptionById } from '@/utils/subscription'
 import { Metadata } from 'next'
-import ClientPage from './ClientPage'
+import SubscriptionsPage from './SubscriptionsPage'
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -10,17 +10,21 @@ export async function generateMetadata(): Promise<Metadata> {
   }
 }
 
-export default async function Page({
-  params,
-}: {
-  params: { organization: string; id: string }
+export default async function Page(props: {
+  params: Promise<{ organization: string; id: string }>
 }) {
-  const api = getServerSideAPI()
+  const params = await props.params
+  const api = await getServerSideAPI()
   const organization = await getOrganizationBySlugOrNotFound(
     api,
     params.organization,
   )
   const subscription = await getSubscriptionById(api, params.id)
 
-  return <ClientPage organization={organization} subscription={subscription} />
+  return (
+    <SubscriptionsPage
+      organization={organization}
+      subscription={subscription}
+    />
+  )
 }

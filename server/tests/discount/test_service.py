@@ -1,11 +1,8 @@
 import asyncio
 from datetime import timedelta
-from types import SimpleNamespace
 from typing import Literal
-from unittest.mock import MagicMock
 
 import pytest
-from pytest_mock import MockerFixture
 
 from polar.auth.models import AuthSubject, User
 from polar.checkout.schemas import CheckoutUpdatePublic
@@ -17,7 +14,6 @@ from polar.discount.schemas import (
 from polar.discount.service import DiscountNotRedeemableError
 from polar.discount.service import discount as discount_service
 from polar.exceptions import PolarRequestValidationError
-from polar.integrations.stripe.service import StripeService
 from polar.kit.utils import utc_now
 from polar.locker import Locker
 from polar.models import (
@@ -28,7 +24,12 @@ from polar.models import (
     Product,
     UserOrganization,
 )
-from polar.models.discount import DiscountDuration, DiscountType
+from polar.models.discount import (
+    DiscountDuration,
+    DiscountFixed,
+    DiscountPercentage,
+    DiscountType,
+)
 from polar.postgres import AsyncSession
 from tests.fixtures.database import SaveFixture
 from tests.fixtures.random_objects import create_checkout, create_discount
@@ -42,13 +43,6 @@ async def create_discount_redemption(
     return discount_redemption
 
 
-@pytest.fixture(autouse=True)
-def stripe_service_mock(mocker: MockerFixture) -> MagicMock:
-    mock = MagicMock(spec=StripeService)
-    mocker.patch("polar.discount.service.stripe_service", new=mock)
-    return mock
-
-
 @pytest.mark.asyncio
 class TestCreate:
     @pytest.mark.auth
@@ -56,7 +50,6 @@ class TestCreate:
         self,
         auth_subject: AuthSubject[User],
         session: AsyncSession,
-        stripe_service_mock: MagicMock,
         organization: Organization,
         user_organization: UserOrganization,
         product: Product,
@@ -80,9 +73,6 @@ class TestCreate:
         )
 
         assert discount.name == "A" * 256
-        stripe_service_mock.create_coupon.assert_called_once()
-        name_params = stripe_service_mock.create_coupon.call_args[1]["name"]
-        assert name_params == "A" * 40
 
 
 @pytest.mark.asyncio
@@ -132,7 +122,7 @@ class TestUpdate:
             )
 
     @pytest.mark.parametrize(
-        "field,value",
+        ("field", "value"),
         [
             ("amount", 1000),
             ("basis_points", 1000),
@@ -175,47 +165,83 @@ class TestUpdate:
             await discount_service.update(
                 session,
                 discount,
-                discount_update=DiscountUpdate.model_validate({field: value}),
+                discount_update=DiscountUpdate.model_validate(
+                    {
+                        field: value,
+                        # Make sure passing "currency"
+                        # doesn't cause AttributeError on percentage discounts
+                        "currency": "usd",
+                    }
+                ),
             )
 
+    @pytest.mark.parametrize(
+        ("type", "payload"),
+        [
+            (
+                DiscountType.percentage,
+                DiscountUpdate(
+                    basis_points=2000,
+                    # Make sure passing "currency" doesn't cause AttributeError
+                    # on percentage discounts
+                    currency="usd",
+                ),
+            ),
+            (
+                DiscountType.fixed,
+                DiscountUpdate(
+                    amount=2000,
+                    currency="usd",
+                    # Make sure passing "basis_points" doesn't cause AttributeError
+                    # on percentage discounts
+                    basis_points=2000,
+                ),
+            ),
+        ],
+    )
     async def test_update_sensitive_fields(
         self,
-        stripe_service_mock: MagicMock,
+        type: DiscountType,
+        payload: DiscountUpdate,
         save_fixture: SaveFixture,
         session: AsyncSession,
         organization: Organization,
     ) -> None:
-        stripe_service_mock.create_coupon.return_value = SimpleNamespace(
-            id="NEW_STRIPE_COUPON_ID"
-        )
-
-        discount = await create_discount(
-            save_fixture,
-            type=DiscountType.percentage,
-            basis_points=1000,
-            duration=DiscountDuration.once,
-            organization=organization,
-            starts_at=utc_now() - timedelta(days=1),
-            ends_at=utc_now() + timedelta(days=1),
-        )
-        old_stripe_coupon_id = discount.stripe_coupon_id
+        discount: Discount
+        if type == DiscountType.percentage:
+            discount = await create_discount(
+                save_fixture,
+                type=DiscountType.percentage,
+                basis_points=1000,
+                duration=DiscountDuration.once,
+                organization=organization,
+            )
+        else:
+            discount = await create_discount(
+                save_fixture,
+                type=DiscountType.fixed,
+                amount=1000,
+                currency="usd",
+                duration=DiscountDuration.once,
+                organization=organization,
+            )
 
         updated_ends_at = utc_now() + timedelta(days=2)
+        payload.ends_at = updated_ends_at
         updated_discount = await discount_service.update(
-            session,
-            discount,
-            discount_update=DiscountUpdate(ends_at=updated_ends_at),
+            session, discount, discount_update=payload
         )
 
-        assert updated_discount.ends_at == updated_ends_at
-        assert updated_discount.stripe_coupon_id == "NEW_STRIPE_COUPON_ID"
+        if isinstance(updated_discount, DiscountPercentage):
+            assert updated_discount.basis_points == 2000
+        elif isinstance(updated_discount, DiscountFixed):
+            assert updated_discount.amount == 2000
+            assert updated_discount.currency == "usd"
 
-        stripe_service_mock.delete_coupon.assert_called_once_with(old_stripe_coupon_id)
-        stripe_service_mock.create_coupon.assert_called_once()
+        assert updated_discount.ends_at == updated_ends_at
 
     async def test_update_name(
         self,
-        stripe_service_mock: MagicMock,
         save_fixture: SaveFixture,
         session: AsyncSession,
         organization: Organization,
@@ -227,7 +253,6 @@ class TestUpdate:
             duration=DiscountDuration.once,
             organization=organization,
         )
-        old_stripe_coupon_id = discount.stripe_coupon_id
 
         updated_discount = await discount_service.update(
             session,
@@ -236,15 +261,9 @@ class TestUpdate:
         )
 
         assert updated_discount.name == "Updated Name"
-        assert updated_discount.stripe_coupon_id == old_stripe_coupon_id
-
-        stripe_service_mock.update_coupon.assert_called_once_with(
-            old_stripe_coupon_id, name="Updated Name"
-        )
 
     async def test_update_products(
         self,
-        stripe_service_mock: MagicMock,
         save_fixture: SaveFixture,
         session: AsyncSession,
         organization: Organization,
@@ -259,7 +278,6 @@ class TestUpdate:
             organization=organization,
             products=[product],
         )
-        old_stripe_coupon_id = discount.stripe_coupon_id
 
         updated_discount = await discount_service.update(
             session,
@@ -268,12 +286,9 @@ class TestUpdate:
         )
 
         assert updated_discount.products == [product_one_time]
-        assert updated_discount.stripe_coupon_id == old_stripe_coupon_id
-        stripe_service_mock.update_coupon.assert_not_called()
 
     async def test_update_products_reset(
         self,
-        stripe_service_mock: MagicMock,
         save_fixture: SaveFixture,
         session: AsyncSession,
         organization: Organization,
@@ -287,7 +302,6 @@ class TestUpdate:
             organization=organization,
             products=[product],
         )
-        old_stripe_coupon_id = discount.stripe_coupon_id
 
         updated_discount = await discount_service.update(
             session,
@@ -296,12 +310,9 @@ class TestUpdate:
         )
 
         assert updated_discount.products == []
-        assert updated_discount.stripe_coupon_id == old_stripe_coupon_id
-        stripe_service_mock.update_coupon.assert_not_called()
 
     async def test_update_discount_past_dates(
         self,
-        stripe_service_mock: MagicMock,
         save_fixture: SaveFixture,
         session: AsyncSession,
         organization: Organization,
@@ -315,7 +326,6 @@ class TestUpdate:
             starts_at=utc_now() - timedelta(days=7),
             ends_at=utc_now() - timedelta(days=1),
         )
-        old_stripe_coupon_id = discount.stripe_coupon_id
 
         updated_discount = await discount_service.update(
             session,
@@ -328,15 +338,64 @@ class TestUpdate:
         )
 
         assert updated_discount.name == "Updated Name"
-        assert updated_discount.stripe_coupon_id == old_stripe_coupon_id
         assert updated_discount.starts_at == discount.starts_at
         assert updated_discount.ends_at == discount.ends_at
 
-        stripe_service_mock.update_coupon.assert_called_once_with(
-            old_stripe_coupon_id, name="Updated Name"
+    async def test_update_code_already_exists(
+        self,
+        save_fixture: SaveFixture,
+        session: AsyncSession,
+        organization: Organization,
+    ) -> None:
+        existing_discount = await create_discount(
+            save_fixture,
+            type=DiscountType.percentage,
+            basis_points=1000,
+            duration=DiscountDuration.once,
+            organization=organization,
+            code="EXISTING",
         )
-        stripe_service_mock.delete_coupon.assert_not_called()
-        stripe_service_mock.create_coupon.assert_not_called()
+        discount_to_update = await create_discount(
+            save_fixture,
+            type=DiscountType.percentage,
+            basis_points=2000,
+            duration=DiscountDuration.once,
+            organization=organization,
+            code="OTHER",
+        )
+
+        with pytest.raises(PolarRequestValidationError) as exc_info:
+            await discount_service.update(
+                session,
+                discount_to_update,
+                discount_update=DiscountUpdate(code="EXISTING"),
+            )
+
+        assert exc_info.value.errors()[0]["loc"] == ("body", "code")
+        assert "already exists" in exc_info.value.errors()[0]["msg"]
+
+    async def test_update_code_same_discount(
+        self,
+        save_fixture: SaveFixture,
+        session: AsyncSession,
+        organization: Organization,
+    ) -> None:
+        discount = await create_discount(
+            save_fixture,
+            type=DiscountType.percentage,
+            basis_points=1000,
+            duration=DiscountDuration.once,
+            organization=organization,
+            code="MYCODE",
+        )
+
+        updated_discount = await discount_service.update(
+            session,
+            discount,
+            discount_update=DiscountUpdate(code="mycode"),
+        )
+
+        assert updated_discount.code == "mycode"
 
 
 @pytest.mark.asyncio
@@ -548,3 +607,88 @@ class TestCodeCaseInsensitivity:
             ),
         )
         assert checkout_product.discount_id == discount.id
+
+
+@pytest.mark.asyncio
+class TestIsRepetitionExpired:
+    async def test_once_not_trialing(
+        self,
+        save_fixture: SaveFixture,
+        organization: Organization,
+    ) -> None:
+        """Test that 'once' discount expires immediately when not trialing."""
+        discount = await create_discount(
+            save_fixture,
+            type=DiscountType.percentage,
+            basis_points=10_000,
+            duration=DiscountDuration.once,
+            organization=organization,
+        )
+
+        now = utc_now()
+        # For non-trialing subscriptions, 'once' discount should expire after first use
+        assert discount.is_repetition_expired(now, now, False) is True
+
+    async def test_once_was_trialing(
+        self,
+        save_fixture: SaveFixture,
+        organization: Organization,
+    ) -> None:
+        """Test that 'once' discount does NOT expire when transitioning from trial."""
+        discount = await create_discount(
+            save_fixture,
+            type=DiscountType.percentage,
+            basis_points=10_000,
+            duration=DiscountDuration.once,
+            organization=organization,
+        )
+
+        now = utc_now()
+        # When transitioning from trial, 'once' discount should still apply
+        assert discount.is_repetition_expired(now, now, True) is False
+
+    async def test_forever_never_expires(
+        self,
+        save_fixture: SaveFixture,
+        organization: Organization,
+    ) -> None:
+        """Test that 'forever' discount never expires."""
+        discount = await create_discount(
+            save_fixture,
+            type=DiscountType.percentage,
+            basis_points=5_000,
+            duration=DiscountDuration.forever,
+            organization=organization,
+        )
+
+        now = utc_now()
+        future = now + timedelta(days=365)
+        # Forever discounts never expire
+        assert discount.is_repetition_expired(now, future, False) is False
+        assert discount.is_repetition_expired(now, future, True) is False
+
+    async def test_repeating_expires_after_duration(
+        self,
+        save_fixture: SaveFixture,
+        organization: Organization,
+    ) -> None:
+        """Test that 'repeating' discount expires after specified months."""
+        discount = await create_discount(
+            save_fixture,
+            type=DiscountType.percentage,
+            basis_points=5_000,
+            duration=DiscountDuration.repeating,
+            duration_in_months=3,
+            organization=organization,
+        )
+
+        now = utc_now()
+        within_duration = now + timedelta(days=30)  # ~1 month
+        after_duration = now + timedelta(days=120)  # ~4 months
+
+        # Should not expire within duration
+        assert discount.is_repetition_expired(now, within_duration, False) is False
+        # Should expire after duration
+        assert discount.is_repetition_expired(now, after_duration, False) is True
+        # was_trialing should not affect repeating discounts
+        assert discount.is_repetition_expired(now, after_duration, True) is True

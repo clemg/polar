@@ -1,5 +1,3 @@
-from typing import TypeAlias
-
 from typing_extensions import TypeIs
 
 from polar.models.product_price import (
@@ -12,9 +10,10 @@ from polar.models.product_price import (
     ProductPriceFixed,
     ProductPriceFree,
     ProductPriceMeteredUnit,
+    ProductPriceSeatUnit,
 )
 
-StaticPrice: TypeAlias = (
+type StaticPrice = (
     ProductPriceFixed
     | LegacyRecurringProductPriceFixed
     | ProductPriceFree
@@ -23,15 +22,17 @@ StaticPrice: TypeAlias = (
     | LegacyRecurringProductPriceCustom
 )
 
-FixedPrice: TypeAlias = ProductPriceFixed | LegacyRecurringProductPriceFixed
+type FixedPrice = ProductPriceFixed | LegacyRecurringProductPriceFixed
 
-CustomPrice: TypeAlias = ProductPriceCustom | LegacyRecurringProductPriceCustom
+type CustomPrice = ProductPriceCustom | LegacyRecurringProductPriceCustom
 
-FreePrice: TypeAlias = ProductPriceFree | LegacyRecurringProductPriceFree
+type FreePrice = ProductPriceFree | LegacyRecurringProductPriceFree
 
-MeteredPrice: TypeAlias = ProductPriceMeteredUnit
+type MeteredPrice = ProductPriceMeteredUnit
 
-LegacyPrice: TypeAlias = (
+type SeatPrice = ProductPriceSeatUnit
+
+type LegacyPrice = (
     LegacyRecurringProductPriceFixed
     | LegacyRecurringProductPriceFree
     | LegacyRecurringProductPriceCustom
@@ -73,7 +74,16 @@ def is_metered_price(price: ProductPrice) -> TypeIs[MeteredPrice]:
     return price.is_metered
 
 
+def is_seat_price(price: ProductPrice) -> TypeIs[SeatPrice]:
+    return isinstance(price, ProductPriceSeatUnit)
+
+
 def is_discount_applicable(
     price: ProductPrice,
-) -> TypeIs[FixedPrice | CustomPrice | MeteredPrice]:
-    return is_fixed_price(price) or is_custom_price(price) or is_metered_price(price)
+) -> TypeIs[FixedPrice | CustomPrice | MeteredPrice | SeatPrice]:
+    return (
+        is_fixed_price(price)
+        or is_custom_price(price)
+        or is_metered_price(price)
+        or is_seat_price(price)
+    )

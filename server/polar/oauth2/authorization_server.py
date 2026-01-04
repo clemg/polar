@@ -7,7 +7,6 @@ import structlog
 from authlib.oauth2 import AuthorizationServer as _AuthorizationServer
 from authlib.oauth2 import OAuth2Error
 from authlib.oauth2.rfc6749.errors import (
-    InvalidScopeError,
     UnsupportedResponseTypeError,
 )
 from authlib.oauth2.rfc6750 import BearerTokenGenerator
@@ -24,6 +23,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 from starlette.responses import Response
 
+from polar.auth.scope import Scope
 from polar.config import settings
 from polar.kit.crypto import generate_token, get_token_hash
 from polar.logging import Logger
@@ -62,24 +62,44 @@ class ClientRegistrationEndpoint(_ClientRegistrationEndpoint):
         assert client.registration_access_token is not None
         return {
             "registration_client_uri": str(
-                request._request.url_for(
-                    "oauth2:get_client", client_id=client.client_id
-                )
+                request.url_for("oauth2:get_client", client_id=client.client_id)
             ),
             "registration_access_token": client.registration_access_token,
         }
 
-    def generate_client_id(self) -> str:
+    def generate_client_id(self, request: StarletteJsonRequest) -> str:
         return generate_token(prefix=CLIENT_ID_PREFIX)
 
-    def generate_client_secret(self) -> str:
+    def generate_client_secret(self, request: StarletteJsonRequest) -> str:
         return generate_token(prefix=CLIENT_SECRET_PREFIX)
+
+    def create_registration_response(
+        self, request: StarletteJsonRequest
+    ) -> tuple[int, dict[str, typing.Any], list[tuple[str, str]]]:
+        """
+        Create client registration response.
+
+        Temporary workaround: Exclude client_secret and client_secret_expires_at
+        from the response when token_endpoint_auth_method is 'none', as this
+        helps clients that haven't yet updated to properly handle public clients.
+        """
+        status, body, headers = super().create_registration_response(request)
+
+        # Check if this is a public client (token_endpoint_auth_method = none)
+        if isinstance(body, dict):
+            token_endpoint_auth_method = body.get("token_endpoint_auth_method")
+            if token_endpoint_auth_method == "none":
+                # Remove client_secret fields for public clients as a temporary workaround
+                body.pop("client_secret", None)
+                body.pop("client_secret_expires_at", None)
+
+        return status, body, headers
 
     def get_server_metadata(self) -> dict[str, typing.Any]:
         return _get_server_metadata(self.server)
 
-    def authenticate_token(self, request: StarletteJsonRequest) -> User | None:
-        return request.user
+    def authenticate_token(self, request: StarletteJsonRequest) -> User | str:
+        return request.user if request.user is not None else "dynamic_client"
 
     def save_client(
         self,
@@ -90,8 +110,8 @@ class ClientRegistrationEndpoint(_ClientRegistrationEndpoint):
         oauth2_client = OAuth2Client(**client_info)
         oauth2_client.set_client_metadata(client_metadata)
 
-        assert request.user is not None
-        oauth2_client.user_id = request.user.id
+        if request.user is not None:
+            oauth2_client.user_id = request.user.id
         oauth2_client.registration_access_token = generate_token(
             prefix=CLIENT_REGISTRATION_TOKEN_PREFIX
         )
@@ -109,12 +129,32 @@ class ClientConfigurationEndpoint(_ClientConfigurationEndpoint):
     ) -> dict[str, str]:
         return {
             "registration_client_uri": str(
-                request._request.url_for(
-                    "oauth2:get_client", client_id=client.client_id
-                )
+                request.url_for("oauth2:get_client", client_id=client.client_id)
             ),
             "registration_access_token": client.registration_access_token,
         }
+
+    def create_read_client_response(
+        self, client: OAuth2Client, request: StarletteJsonRequest
+    ) -> tuple[int, dict[str, typing.Any], list[tuple[str, str]]]:
+        """
+        Create client read response (GET endpoint).
+
+        Temporary workaround: Exclude client_secret and client_secret_expires_at
+        from the response when token_endpoint_auth_method is 'none', as this
+        helps clients that haven't yet updated to properly handle public clients.
+        """
+        status, body, headers = super().create_read_client_response(client, request)
+
+        # Check if this is a public client (token_endpoint_auth_method = none)
+        if isinstance(body, dict):
+            token_endpoint_auth_method = body.get("token_endpoint_auth_method")
+            if token_endpoint_auth_method == "none":
+                # Remove client_secret fields for public clients as a temporary workaround
+                body.pop("client_secret", None)
+                body.pop("client_secret_expires_at", None)
+
+        return status, body, headers
 
     def authenticate_token(self, request: StarletteJsonRequest) -> User | str | None:
         if request.user is not None:
@@ -195,10 +235,10 @@ class _QueryTokenMixin:
 
     def query_token(
         self,
-        token: str,
+        token_string: str,
         token_type_hint: typing.Literal["access_token", "refresh_token"] | None,
     ) -> OAuth2Token | None:
-        token_hash = get_token_hash(token, secret=settings.SECRET)
+        token_hash = get_token_hash(token_string, secret=settings.SECRET)
         statement = select(OAuth2Token)
         if token_type_hint == "access_token":
             statement = statement.where(OAuth2Token.access_token == token_hash)
@@ -221,9 +261,7 @@ class RevocationEndpoint(_QueryTokenMixin, _RevocationEndpoint):
 
     def revoke_token(self, token: OAuth2Token, request: StarletteOAuth2Request) -> None:
         now = int(time.time())
-        hint: typing.Literal["access_token", "refresh_token"] | None = request.form.get(
-            "token_type_hint"
-        )
+        hint = request.form.get("token_type_hint")
         token.access_token_revoked_at = now  # pyright: ignore
         if hint != "access_token":
             token.refresh_token_revoked_at = now  # pyright: ignore
@@ -254,10 +292,12 @@ class AuthorizationServer(_AuthorizationServer):
         self,
         session: Session,
         *,
-        scopes_supported: list[str] | None = None,
         error_uris: list[tuple[str, str]] | None = None,
     ) -> None:
-        super().__init__(scopes_supported)
+        super().__init__(
+            # Allow also reserved scopes for first-party clients
+            scopes_supported=[s.value for s in Scope],
+        )
         self.session = session
         self._error_uris = dict(error_uris) if error_uris is not None else None
 
@@ -268,26 +308,15 @@ class AuthorizationServer(_AuthorizationServer):
         cls,
         session: Session,
         *,
-        scopes_supported: list[str] | None = None,
         error_uris: list[tuple[str, str]] | None = None,
     ) -> typing.Self:
-        authorization_server = cls(
-            session, scopes_supported=scopes_supported, error_uris=error_uris
-        )
+        authorization_server = cls(session, error_uris=error_uris)
         authorization_server.register_endpoint(RevocationEndpoint)
         authorization_server.register_endpoint(IntrospectionEndpoint)
         authorization_server.register_endpoint(ClientRegistrationEndpoint)
         authorization_server.register_endpoint(ClientConfigurationEndpoint)
         register_grants(authorization_server)
         return authorization_server
-
-    def validate_requested_scope(
-        self, scope: str | None, state: str | None = None
-    ) -> None:
-        # We require scope to be provided
-        if scope is None:
-            raise InvalidScopeError(state=state)
-        return super().validate_requested_scope(scope, state)
 
     def query_client(self, client_id: str) -> OAuth2Client | None:
         statement = select(OAuth2Client).where(
@@ -403,12 +432,14 @@ class AuthorizationServer(_AuthorizationServer):
         assert grant.sub_type is not None
         assert grant.sub is not None
         assert grant.client is not None
+        payload = request.payload
+        assert payload is not None
         oauth2_grant_service.create_or_update_grant(
             self.session,
             sub_type=grant.sub_type,
             sub_id=grant.sub.id,
             client_id=grant.client.client_id,
-            scope=request.scope,
+            scope=payload.scope,
         )
 
     @property

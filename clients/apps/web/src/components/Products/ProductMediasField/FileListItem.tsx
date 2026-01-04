@@ -6,7 +6,7 @@ import { twMerge } from 'tailwind-merge'
 
 import { FileObject } from '@/components/FileUpload'
 import { toast } from '@/components/Toast/use-toast'
-import { ClearOutlined } from '@mui/icons-material'
+import ClearOutlined from '@mui/icons-material/ClearOutlined'
 import { schemas } from '@polar-sh/client'
 import { useMemo } from 'react'
 
@@ -47,9 +47,8 @@ export const FileListItem = ({
   const imageURL = useMemo(() => {
     if (file.public_url) {
       return file.public_url
-    } else if (file.buffer) {
-      const blob = new Blob([file.buffer], { type: file.mime_type })
-      return URL.createObjectURL(blob)
+    } else if (file.file) {
+      return URL.createObjectURL(file.file)
     }
     return undefined
   }, [file])
@@ -80,13 +79,15 @@ export const FileListItem = ({
         <button
           type="button"
           onClick={onDelete}
-          className="absolute right-4 top-4 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-xs text-white"
+          className="absolute top-0 right-0 flex h-[44px] w-[44px] cursor-pointer items-center justify-center"
         >
-          <ClearOutlined fontSize="inherit" />
+          <div className="flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-xs text-white">
+            <ClearOutlined fontSize="inherit" />
+          </div>
         </button>
       )}
       {isUploading && (
-        <div className="absolute left-0 top-0 h-full w-full bg-black opacity-50"></div>
+        <div className="absolute top-0 left-0 h-full w-full bg-black opacity-50"></div>
       )}
     </div>
   )

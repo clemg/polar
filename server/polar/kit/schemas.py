@@ -2,7 +2,7 @@ import dataclasses
 import json
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Annotated, Any, Literal, TypeVar, cast, get_args, overload
+from typing import Annotated, Any, Literal, cast, get_args, overload
 
 from pydantic import (
     UUID4,
@@ -144,10 +144,7 @@ class SelectorWidget:
         return hash(json.dumps(self._get_extra_attributes()))
 
 
-Q = TypeVar("Q")
-
-
-class MultipleQueryFilter(Sequence[Q]):
+class MultipleQueryFilter[Q](Sequence[Q]):
     """
     Custom type to handle query filters that can be either
     a single value or a list of values.
@@ -194,7 +191,7 @@ class MultipleQueryFilter(Sequence[Q]):
     def _scalar_to_sequence(cls, v: Q | Sequence[Q]) -> Sequence[Q]:
         if isinstance(v, Sequence) and not isinstance(v, str):
             return v
-        return [cast(Q, v)]
+        return [cast(Q, v)]  # type: ignore[redundant-cast]
 
 
 ORGANIZATION_ID_EXAMPLE = "1dbfc517-0bbf-4301-9ba8-555ca42b9737"
@@ -206,3 +203,5 @@ SUBSCRIPTION_ID_EXAMPLE = "e5149aae-e521-42b9-b24c-abb3d71eea2e"
 BENEFIT_GRANT_ID_EXAMPLE = "d322132c-a9d0-4e0d-b8d3-d81ad021a3a9"
 METER_ID_EXAMPLE = "d498a884-e2cd-4d3e-8002-f536468a8b22"
 CHECKOUT_ID_EXAMPLE = "e4b478fa-cd25-4253-9f1f-8a41e6370ede"
+ORDER_ID_EXAMPLE = "57107b74-8400-4d80-a2fc-54c2b4239cb3"
+PAYMENT_ID_EXAMPLE = "42b94870-36b9-4573-96b6-b90b1c99a353"

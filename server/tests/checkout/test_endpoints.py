@@ -17,15 +17,29 @@ from polar.enums import SubscriptionRecurringInterval
 from polar.integrations.stripe.service import StripeService
 from polar.kit.tax import calculate_tax
 from polar.kit.utils import utc_now
-from polar.models import Checkout, Product, User, UserOrganization
+from polar.models import (
+    Checkout,
+    Customer,
+    Discount,
+    Organization,
+    Product,
+    Subscription,
+    User,
+    UserOrganization,
+    WebhookEndpoint,
+)
 from polar.models.checkout import CheckoutStatus
+from polar.models.discount import DiscountDuration, DiscountType
 from polar.postgres import AsyncSession
 from tests.fixtures.auth import AuthSubjectFixture
 from tests.fixtures.database import SaveFixture
 from tests.fixtures.random_objects import (
     create_checkout,
+    create_discount,
     create_organization,
     create_product,
+    create_product_price_seat_unit,
+    create_webhook_endpoint,
 )
 
 
@@ -61,6 +75,13 @@ async def checkout_open(
     return await create_checkout(save_fixture, products=[product_one_time])
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def webhook_endpoint(
+    save_fixture: SaveFixture, organization: Organization
+) -> WebhookEndpoint:
+    return await create_webhook_endpoint(save_fixture, organization=organization)
+
+
 async def create_blocked_product(
     save_fixture: SaveFixture,
     auth_subject: AuthSubject[User],
@@ -83,6 +104,43 @@ async def create_blocked_product(
     )
     await save_fixture(user_organization)
     return product
+
+
+@pytest.mark.asyncio
+class TestList:
+    @pytest.mark.auth
+    async def test_valid(
+        self,
+        session: AsyncSession,
+        save_fixture: SaveFixture,
+        api_prefix: str,
+        user_organization: UserOrganization,
+        client: AsyncClient,
+        product: Product,
+        product_one_time: Product,
+        customer: Customer,
+        subscription: Subscription,
+        discount_percentage_50: Discount,
+    ) -> None:
+        checkouts = [
+            await create_checkout(save_fixture, products=[product]),
+            await create_checkout(
+                save_fixture, products=[product], subscription=subscription
+            ),
+            await create_checkout(
+                save_fixture, products=[product], discount=discount_percentage_50
+            ),
+            await create_checkout(save_fixture, products=[product], customer=customer),
+            await create_checkout(save_fixture, products=[product_one_time]),
+        ]
+
+        session.expunge_all()
+
+        response = await client.get(f"{api_prefix}/")
+        assert response.status_code == 200
+
+        json = response.json()
+        assert len(json["items"]) == len(checkouts)
 
 
 @pytest.mark.asyncio
@@ -180,6 +238,7 @@ class TestCreateCheckout:
         assert response.status_code == 403
 
     @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.checkouts_write}))
+    @pytest.mark.keep_session_state
     async def test_blocked_organization(
         self,
         api_prefix: str,
@@ -313,6 +372,139 @@ class TestCreateCheckout:
         assert json["external_customer_id"] == "external_customer_id_value"
         assert json["customer_external_id"] == "external_customer_id_value"
 
+    @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.checkouts_write}))
+    async def test_return_url(
+        self,
+        api_prefix: str,
+        client: AsyncClient,
+        product: Product,
+        user_organization: UserOrganization,
+    ) -> None:
+        body = {
+            "payment_processor": "stripe",
+            "product_price_id": str(product.prices[0].id),
+            "return_url": "https://example.com/return",
+        }
+
+        response = await client.post(f"{api_prefix}/", json=body)
+
+        assert response.status_code == 201
+
+        json = response.json()
+        assert json["return_url"] == "https://example.com/return"
+
+    @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.checkouts_write}))
+    async def test_valid_seat_based_checkout(
+        self,
+        api_prefix: str,
+        save_fixture: SaveFixture,
+        client: AsyncClient,
+        user_organization: UserOrganization,
+        organization: Organization,
+    ) -> None:
+        product = await create_product(
+            save_fixture,
+            organization=organization,
+            recurring_interval=SubscriptionRecurringInterval.month,
+            prices=[],
+        )
+        price = await create_product_price_seat_unit(
+            save_fixture, product=product, price_per_seat=1500
+        )
+        product.prices = [price]
+
+        response = await client.post(
+            f"{api_prefix}/",
+            json={
+                "payment_processor": "stripe",
+                "product_price_id": str(price.id),
+                "seats": 6,
+            },
+        )
+
+        assert response.status_code == 201
+
+        json = response.json()
+        assert json["seats"] == 6
+        assert json["amount"] == 1500 * 6
+        assert json["product_price"]["id"] == str(price.id)
+
+    @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.checkouts_write}))
+    async def test_seat_based_missing_seats(
+        self,
+        api_prefix: str,
+        save_fixture: SaveFixture,
+        client: AsyncClient,
+        user_organization: UserOrganization,
+        organization: Organization,
+    ) -> None:
+        product = await create_product(
+            save_fixture,
+            organization=organization,
+            recurring_interval=SubscriptionRecurringInterval.month,
+            prices=[],
+        )
+        price = await create_product_price_seat_unit(
+            save_fixture, product=product, price_per_seat=1500
+        )
+        product.prices = [price]
+
+        response = await client.post(
+            f"{api_prefix}/",
+            json={
+                "payment_processor": "stripe",
+                "product_price_id": str(price.id),
+            },
+        )
+
+        assert response.status_code == 422
+
+        json = response.json()
+        assert any(error["loc"] == ["body", "seats"] for error in json["detail"])
+
+    @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.checkouts_write}))
+    async def test_valid_ad_hoc_prices(
+        self,
+        api_prefix: str,
+        client: AsyncClient,
+        product: Product,
+        product_recurring_trial: Product,
+        user_organization: UserOrganization,
+    ) -> None:
+        response = await client.post(
+            f"{api_prefix}/",
+            json={
+                "payment_processor": "stripe",
+                "products": [str(product.id), str(product_recurring_trial.id)],
+                "prices": {
+                    str(product.id): [
+                        {
+                            "amount_type": "fixed",
+                            "price_amount": 100_00,
+                            "currency": "usd",
+                        }
+                    ],
+                    str(product_recurring_trial.id): [
+                        {
+                            "amount_type": "fixed",
+                            "price_amount": 50_00,
+                            "currency": "usd",
+                        }
+                    ],
+                },
+            },
+        )
+
+        assert response.status_code == 201
+
+        json = response.json()
+        assert len(json["products"]) == 2
+
+        for p in [product, product_recurring_trial]:
+            assert len(json["prices"][str(p.id)]) == 1
+            ad_hoc_price = json["prices"][str(p.id)][0]
+            assert ad_hoc_price["id"] != str(p.prices[0].id)
+
 
 @pytest.mark.asyncio
 class TestUpdateCheckout:
@@ -378,6 +570,114 @@ class TestUpdateCheckout:
 
         json = response.json()
         assert json["metadata"] == {"test": "test"}
+
+    @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.checkouts_write}))
+    async def test_update_seats(
+        self,
+        api_prefix: str,
+        save_fixture: SaveFixture,
+        session: AsyncSession,
+        client: AsyncClient,
+        user_organization: UserOrganization,
+        organization: Organization,
+    ) -> None:
+        product = await create_product(
+            save_fixture,
+            organization=organization,
+            recurring_interval=SubscriptionRecurringInterval.month,
+            prices=[],
+        )
+        price = await create_product_price_seat_unit(
+            save_fixture, product=product, price_per_seat=2500
+        )
+        product.prices = [price]
+
+        checkout = await create_checkout(save_fixture, products=[product], seats=4)
+
+        response = await client.patch(
+            f"{api_prefix}/{checkout.id}",
+            json={
+                "seats": 10,
+            },
+        )
+
+        assert response.status_code == 200
+
+        json = response.json()
+        assert json["seats"] == 10
+        assert json["amount"] == 2500 * 10
+
+    @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.checkouts_write}))
+    async def test_update_seats_amount_calculation(
+        self,
+        api_prefix: str,
+        save_fixture: SaveFixture,
+        client: AsyncClient,
+        user_organization: UserOrganization,
+        organization: Organization,
+    ) -> None:
+        product = await create_product(
+            save_fixture,
+            organization=organization,
+            recurring_interval=SubscriptionRecurringInterval.month,
+            prices=[],
+        )
+        price = await create_product_price_seat_unit(
+            save_fixture, product=product, price_per_seat=3000
+        )
+        product.prices = [price]
+
+        checkout = await create_checkout(save_fixture, products=[product], seats=2)
+
+        # Initial state
+        response = await client.get(f"{api_prefix}/{checkout.id}")
+        json = response.json()
+        assert json["seats"] == 2
+        assert json["amount"] == 3000 * 2
+
+        # Update to 7 seats
+        response = await client.patch(
+            f"{api_prefix}/{checkout.id}",
+            json={"seats": 7},
+        )
+
+        assert response.status_code == 200
+
+        json = response.json()
+        assert json["seats"] == 7
+        assert json["amount"] == 3000 * 7
+
+    @pytest.mark.auth(AuthSubjectFixture(scopes={Scope.checkouts_write}))
+    async def test_update_with_discount(
+        self,
+        api_prefix: str,
+        save_fixture: SaveFixture,
+        client: AsyncClient,
+        checkout_open: Checkout,
+        user_organization: UserOrganization,
+        organization: Organization,
+    ) -> None:
+        discount = await create_discount(
+            save_fixture,
+            type=DiscountType.percentage,
+            basis_points=5_000,
+            duration=DiscountDuration.once,
+            organization=organization,
+            code="TESTDISCOUNT50",
+        )
+
+        response = await client.patch(
+            f"{api_prefix}/{checkout_open.id}",
+            json={
+                "discount_id": str(discount.id),
+            },
+        )
+
+        assert response.status_code == 200
+
+        json = response.json()
+        assert json["discount"] is not None
+        assert json["discount"]["id"] == str(discount.id)
 
 
 @pytest.mark.asyncio
@@ -490,6 +790,36 @@ class TestClientUpdate:
         assert updated_checkout is not None
         assert updated_checkout.user_metadata == {}
 
+    async def test_update_with_discount_code(
+        self,
+        api_prefix: str,
+        save_fixture: SaveFixture,
+        client: AsyncClient,
+        checkout_open: Checkout,
+        organization: Organization,
+    ) -> None:
+        await create_discount(
+            save_fixture,
+            type=DiscountType.percentage,
+            basis_points=5_000,
+            duration=DiscountDuration.once,
+            organization=organization,
+            code="TESTDISCOUNT50",
+        )
+
+        response = await client.patch(
+            f"{api_prefix}/client/{checkout_open.client_secret}",
+            json={
+                "discount_code": "TESTDISCOUNT50",
+            },
+        )
+
+        assert response.status_code == 200
+
+        json = response.json()
+        assert json["discount"] is not None
+        assert json["discount"]["code"] == "TESTDISCOUNT50"
+
 
 @pytest.mark.asyncio
 class TestClientConfirm:
@@ -563,3 +893,45 @@ class TestClientConfirm:
 
         json = response.json()
         assert "customer_session_token" in json
+
+    async def test_confirm_with_discount_code(
+        self,
+        api_prefix: str,
+        save_fixture: SaveFixture,
+        stripe_service_mock: MagicMock,
+        client: AsyncClient,
+        checkout_open: Checkout,
+        organization: Organization,
+    ) -> None:
+        await create_discount(
+            save_fixture,
+            type=DiscountType.percentage,
+            basis_points=5_000,
+            duration=DiscountDuration.once,
+            organization=organization,
+            code="TESTDISCOUNT50",
+        )
+
+        stripe_service_mock.create_customer.return_value = SimpleNamespace(
+            id="STRIPE_CUSTOMER_ID"
+        )
+        stripe_service_mock.create_payment_intent.return_value = SimpleNamespace(
+            client_secret="CLIENT_SECRET", status="succeeded"
+        )
+
+        response = await client.post(
+            f"{api_prefix}/client/{checkout_open.client_secret}/confirm",
+            json={
+                "customer_name": "Customer Name",
+                "customer_email": "customer@example.com",
+                "customer_billing_address": {"country": "FR"},
+                "confirmation_token_id": "CONFIRMATION_TOKEN_ID",
+                "discount_code": "TESTDISCOUNT50",
+            },
+        )
+
+        assert response.status_code == 200
+
+        json = response.json()
+        assert json["discount"] is not None
+        assert json["discount"]["code"] == "TESTDISCOUNT50"

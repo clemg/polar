@@ -1,4 +1,4 @@
-import { useBenefitGrants } from '@/hooks/queries/benefits'
+import { useGrantsForBenefit } from '@/hooks/queries/benefits'
 import {
   DataTablePaginationState,
   DataTableSortingState,
@@ -11,15 +11,9 @@ import Avatar from '@polar-sh/ui/components/atoms/Avatar'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import { DataTable } from '@polar-sh/ui/components/atoms/DataTable'
 import FormattedDateTime from '@polar-sh/ui/components/atoms/FormattedDateTime'
-import { Status } from '@polar-sh/ui/components/atoms/Status'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@polar-sh/ui/components/ui/tooltip'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { twMerge } from 'tailwind-merge'
+import { BenefitGrantStatus } from './BenefitGrantStatus'
 
 export interface BenefitPageProps {
   benefit: schemas['Benefit']
@@ -41,7 +35,7 @@ export const BenefitPage = ({ benefit, organization }: BenefitPageProps) => {
 
   const router = useRouter()
 
-  const { data: benefitGrants, isLoading } = useBenefitGrants({
+  const { data: benefitGrants, isLoading } = useGrantsForBenefit({
     benefitId: benefit.id,
     organizationId: organization.id,
     ...getAPIParams(pagination, sorting),
@@ -58,7 +52,7 @@ export const BenefitPage = ({ benefit, organization }: BenefitPageProps) => {
         : updaterOrValue
 
     router.push(
-      `/dashboard/${organization.slug}/benefits?benefitId=${benefit.id}&${getSearchParams(
+      `/dashboard/${organization.slug}/products/benefits/${benefit.id}?${getSearchParams(
         updatedPagination,
         sorting,
       )}`,
@@ -76,7 +70,7 @@ export const BenefitPage = ({ benefit, organization }: BenefitPageProps) => {
         : updaterOrValue
 
     router.push(
-      `/dashboard/${organization.slug}/benefits?benefitId=${benefit.id}&${getSearchParams(
+      `/dashboard/${organization.slug}/products/benefits/${benefit.id}?${getSearchParams(
         pagination,
         updatedSorting,
       )}`,
@@ -92,6 +86,7 @@ export const BenefitPage = ({ benefit, organization }: BenefitPageProps) => {
         sorting={sorting}
         onSortingChange={setSorting}
         pagination={pagination}
+        rowCount={benefitGrants?.pagination.total_count ?? 0}
         pageCount={benefitGrants?.pagination.max_page ?? 1}
         onPaginationChange={setPagination}
         columns={[
@@ -99,65 +94,33 @@ export const BenefitPage = ({ benefit, organization }: BenefitPageProps) => {
             accessorKey: 'customer',
             header: 'Customer',
             cell: ({ row: { original: grant } }) => (
-              <div className="flex items-center gap-3">
-                <Avatar
-                  className="h-10 w-10"
-                  avatar_url={grant.customer.avatar_url}
-                  name={grant.customer.name || grant.customer.email}
-                />
-                <div className="flex min-w-0 flex-col">
-                  <div className="w-full truncate text-sm">
-                    {grant.customer.name ?? '—'}
-                  </div>
-                  <div className="w-full truncate text-xs text-gray-500 dark:text-gray-500">
-                    {grant.customer.email}
+              <Link
+                href={`/dashboard/${organization.slug}/customers/${grant.customer.id}`}
+              >
+                <div className="flex items-center gap-3">
+                  <Avatar
+                    className="h-10 w-10"
+                    avatar_url={grant.customer.avatar_url}
+                    name={grant.customer.name || grant.customer.email}
+                  />
+                  <div className="flex min-w-0 flex-col">
+                    <div className="w-full truncate text-sm">
+                      {grant.customer.name ?? '—'}
+                    </div>
+                    <div className="dark:text-polar-500 w-full truncate text-xs text-gray-500">
+                      {grant.customer.email}
+                    </div>
                   </div>
                 </div>
-              </div>
+              </Link>
             ),
           },
           {
             accessorKey: 'status',
             header: 'Status',
-            cell: ({ row: { original: grant } }) => {
-              const isRevoked = grant.revoked_at !== null
-              const isGranted = grant.is_granted
-              const hasError = grant.error !== null
-
-              const status = hasError
-                ? 'Error'
-                : isRevoked
-                  ? 'Revoked'
-                  : isGranted
-                    ? 'Granted'
-                    : 'Pending'
-
-              const statusDescription = {
-                Revoked: 'The customer does not have access to this benefit',
-                Granted: 'The customer has access to this benefit',
-                Pending: 'The benefit grant is currently being processed',
-                Error: grant.error?.message ?? 'An unknown error occurred',
-              }
-
-              const statusClassNames = {
-                Revoked: 'bg-red-100 text-red-500 dark:bg-red-950',
-                Granted: 'bg-emerald-200 text-emerald-500 dark:bg-emerald-950',
-                Pending: 'bg-yellow-100 text-yellow-500 dark:bg-yellow-950',
-                Error: 'bg-red-100 text-red-500 dark:bg-red-950',
-              }
-
-              return (
-                <Tooltip>
-                  <TooltipTrigger>
-                    <Status
-                      className={twMerge('w-fit', statusClassNames[status])}
-                      status={status}
-                    />
-                  </TooltipTrigger>
-                  <TooltipContent>{statusDescription[status]}</TooltipContent>
-                </Tooltip>
-              )
-            },
+            cell: ({ row: { original: grant } }) => (
+              <BenefitGrantStatus grant={grant} />
+            ),
           },
           {
             accessorKey: 'created_at',
@@ -169,18 +132,37 @@ export const BenefitPage = ({ benefit, organization }: BenefitPageProps) => {
           {
             accessorKey: 'order',
             header: 'Order',
-            cell: ({ row: { original: grant } }) =>
-              grant.order_id ? (
-                <Link
-                  href={`/dashboard/${organization.slug}/sales/${grant.order_id}`}
-                >
-                  <Button size="sm" variant="secondary">
-                    View Order
-                  </Button>
-                </Link>
-              ) : (
-                <></>
-              ),
+            cell: ({ row: { original: grant } }) => {
+              const hasOrder = grant.order_id
+              const hasSubscription = grant.subscription_id
+
+              if (!hasOrder && !hasSubscription) {
+                return <></>
+              }
+
+              return (
+                <div className="flex gap-2">
+                  {hasOrder && (
+                    <Link
+                      href={`/dashboard/${organization.slug}/sales/${grant.order_id}`}
+                    >
+                      <Button size="sm" variant="secondary">
+                        View Order
+                      </Button>
+                    </Link>
+                  )}
+                  {hasSubscription && (
+                    <Link
+                      href={`/dashboard/${organization.slug}/sales/subscriptions/${grant.subscription_id}`}
+                    >
+                      <Button size="sm" variant="secondary">
+                        View Subscription
+                      </Button>
+                    </Link>
+                  )}
+                </div>
+              )
+            },
           },
         ]}
       />

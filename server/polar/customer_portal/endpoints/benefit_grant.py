@@ -12,7 +12,6 @@ from polar.models import BenefitGrant
 from polar.models.benefit import BenefitType
 from polar.openapi import APITag
 from polar.order.schemas import OrderID
-from polar.organization.schemas import OrganizationID
 from polar.postgres import get_db_session
 from polar.routing import APIRouter
 from polar.subscription.schemas import SubscriptionID
@@ -30,7 +29,7 @@ from ..service.benefit_grant import (
 
 router = APIRouter(
     prefix="/benefit-grants",
-    tags=["benefit-grants", APITag.documented],
+    tags=["benefit-grants", APITag.public],
 )
 
 BenefitGrantID = Annotated[UUID4, Path(description="The benefit grant ID.")]
@@ -41,7 +40,11 @@ BenefitGrantNotFound = {
 
 ListSorting = Annotated[
     list[Sorting[CustomerBenefitGrantSortProperty]],
-    Depends(SortingGetter(CustomerBenefitGrantSortProperty, ["-granted_at"])),
+    Depends(
+        SortingGetter(
+            CustomerBenefitGrantSortProperty, ["product_benefit", "-granted_at"]
+        )
+    ),
 ]
 
 
@@ -60,9 +63,6 @@ async def list(
     benefit_id: MultipleQueryFilter[UUID4] | None = Query(
         None, title="BenefitID Filter", description="Filter by benefit ID."
     ),
-    organization_id: MultipleQueryFilter[OrganizationID] | None = Query(
-        None, title="OrganizationID Filter", description="Filter by organization ID."
-    ),
     checkout_id: MultipleQueryFilter[UUID4] | None = Query(
         None, title="CheckoutID Filter", description="Filter by checkout ID."
     ),
@@ -72,6 +72,9 @@ async def list(
     subscription_id: MultipleQueryFilter[SubscriptionID] | None = Query(
         None, title="SubscriptionID Filter", description="Filter by subscription ID."
     ),
+    member_id: MultipleQueryFilter[UUID4] | None = Query(
+        None, title="MemberID Filter", description="Filter by member ID."
+    ),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListResource[CustomerBenefitGrant]:
     """List benefits grants of the authenticated customer."""
@@ -80,10 +83,10 @@ async def list(
         auth_subject,
         type=type,
         benefit_id=benefit_id,
-        organization_id=organization_id,
         checkout_id=checkout_id,
         order_id=order_id,
         subscription_id=subscription_id,
+        member_id=member_id,
         pagination=pagination,
         sorting=sorting,
     )

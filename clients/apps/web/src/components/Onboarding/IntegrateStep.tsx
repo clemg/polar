@@ -1,9 +1,10 @@
 import { OrganizationContext } from '@/providers/maintainerOrganization'
-import { ArrowOutwardOutlined } from '@mui/icons-material'
+import ArrowOutwardOutlined from '@mui/icons-material/ArrowOutwardOutlined'
 import { schemas } from '@polar-sh/client'
 import Button from '@polar-sh/ui/components/atoms/Button'
+import { Tabs, TabsList, TabsTrigger } from '@polar-sh/ui/components/atoms/Tabs'
 import Link from 'next/link'
-import { useContext, useState } from 'react'
+import { useContext, useMemo, useState } from 'react'
 import slugify from 'slugify'
 import { twMerge } from 'tailwind-merge'
 import LogoIcon from '../Brand/LogoIcon'
@@ -17,14 +18,33 @@ import {
   SyntaxHighlighterProvider,
 } from '../SyntaxHighlighterShiki/SyntaxHighlighterClient'
 
-const frameworks = (product: schemas['Product']) =>
+const packageManagers = ['pnpm', 'npm', 'yarn', 'bun'] as const
+type PackageManager = (typeof packageManagers)[number]
+
+const getInstallCommand = (
+  packages: string,
+  packageManager: PackageManager,
+): string => {
+  switch (packageManager) {
+    case 'pnpm':
+      return `pnpm add ${packages}`
+    case 'npm':
+      return `npm install ${packages}`
+    case 'yarn':
+      return `yarn add ${packages}`
+    case 'bun':
+      return `bun add ${packages}`
+  }
+}
+
+const frameworks = (products: schemas['Product'][]) =>
   [
     {
       slug: 'nextjs',
       name: 'Next.js',
-      link: 'https://docs.polar.sh/integrate/sdk/adapters/nextjs',
+      link: 'https://polar.sh/docs/integrate/sdk/adapters/nextjs',
       icon: <NextJsIcon size={24} />,
-      install: 'pnpm add @polar-sh/nextjs',
+      packages: '@polar-sh/nextjs',
       code: `import { Checkout } from "@polar-sh/nextjs";
 
 export const GET = Checkout({
@@ -35,9 +55,9 @@ export const GET = Checkout({
     {
       slug: 'better-auth',
       name: 'BetterAuth',
-      link: 'https://docs.polar.sh/integrate/sdk/adapters/better-auth',
+      link: 'https://polar.sh/docs/integrate/sdk/adapters/better-auth',
       icon: <BetterAuthIcon size={24} />,
-      install: 'pnpm add better-auth @polar-sh/better-auth @polar-sh/sdk',
+      packages: 'better-auth @polar-sh/better-auth @polar-sh/sdk',
       code: `import { betterAuth } from "better-auth";
 import { polar, checkout, portal, usage, webhooks } from "@polar-sh/better-auth";
 import { Polar } from "@polar-sh/sdk";
@@ -55,10 +75,14 @@ const auth = betterAuth({
             use: [
                 checkout({
                     products: [
-                        {
-                            productId: "${product.id}",
-                            slug: "${slugify(product.name)}" // Custom slug for easy reference in Checkout URL, e.g. /checkout/${slugify(product.name)}
-                        }
+${products
+  .map(
+    (p) => `                        {
+                            productId: "${p.id}",
+                            slug: "${slugify(p.name)}" // Custom slug for easy reference in Checkout URL, e.g. /checkout/${slugify(p.name)}
+                        }`,
+  )
+  .join(',\n')}
                     ],
                     successUrl: process.env.POLAR_SUCCESS_URL,
                     authenticatedUsersOnly: true
@@ -71,9 +95,9 @@ const auth = betterAuth({
     {
       slug: 'nodejs',
       name: 'Node.js',
-      link: 'https://docs.polar.sh/integrate/sdk/typescript',
+      link: 'https://polar.sh/docs/integrate/sdk/typescript',
       icon: <NodeJsIcon size={24} />,
-      install: 'pnpm add @polar-sh/sdk',
+      packages: '@polar-sh/sdk',
       code: `import { Polar } from "@polar-sh/sdk";
 
 const polar = new Polar({
@@ -81,7 +105,9 @@ const polar = new Polar({
 });
 
 const checkout = await polar.checkouts.create({
-  products: ["${product.id}"],
+  products: [
+${products.map((p) => `    "${p.id}"`).join(',\n')}
+  ],
   successUrl: process.env.POLAR_SUCCESS_URL
 });
 
@@ -90,9 +116,9 @@ redirect(checkout.url)`,
     {
       slug: 'python',
       name: 'Python',
-      link: 'https://docs.polar.sh/integrate/sdk/python',
+      link: 'https://polar.sh/docs/integrate/sdk/python',
       icon: <PythonIcon size={24} />,
-      install: 'pip install polar-sdk',
+      pythonInstall: 'pip install polar-sdk',
       code: `import os
 from polar_sdk import Polar
 
@@ -102,7 +128,7 @@ with Polar(
 
     res = polar.checkouts.create(request={
         "products": [
-            "${product.id}"
+${products.map((p) => `            "${p.id}"`).join(',\n')}
         ],
         "success_url": os.environ.get("POLAR_SUCCESS_URL")
     })
@@ -113,23 +139,44 @@ with Polar(
   ] as const
 
 export interface IntegrateStepProps {
-  product: schemas['Product']
+  products: schemas['Product'][]
 }
 
-export const IntegrateStep = ({ product }: IntegrateStepProps) => {
+export const IntegrateStep = ({ products }: IntegrateStepProps) => {
   const [selectedFramework, setSelectedFramework] = useState<string | null>(
     'nextjs',
   )
+  const [createdToken, setCreatedToken] = useState<string | null>(null)
+  const [packageManager, setPackageManager] = useState<PackageManager>('pnpm')
 
   const { organization } = useContext(OrganizationContext)
 
-  const currentFramework = frameworks(product).find(
-    (framework) => framework.slug === selectedFramework,
+  const parsedFrameworks = useMemo(() => frameworks(products), [products])
+
+  const currentFramework = useMemo(
+    () =>
+      parsedFrameworks.find(
+        (framework) => framework.slug === selectedFramework,
+      ),
+    [parsedFrameworks, selectedFramework],
   )
+
+  const installCommand = useMemo(() => {
+    if (!currentFramework) return ''
+    if ('pythonInstall' in currentFramework && currentFramework.pythonInstall) {
+      return currentFramework.pythonInstall
+    }
+    if ('packages' in currentFramework && currentFramework.packages) {
+      return getInstallCommand(currentFramework.packages, packageManager)
+    }
+    return ''
+  }, [currentFramework, packageManager])
+
+  const isPython = currentFramework?.slug === 'python'
 
   return (
     <div className="flex h-full flex-col md:flex-row">
-      <div className="flex h-full min-h-0 w-full flex-col gap-12 overflow-y-auto p-12 md:max-w-lg">
+      <div className="dark:bg-polar-900 flex h-full min-h-0 w-full flex-col gap-8 overflow-y-auto p-12 md:max-w-lg">
         <div className="flex flex-col gap-y-12">
           <LogoIcon size={50} />
           <div className="flex flex-col gap-y-4">
@@ -139,20 +186,10 @@ export const IntegrateStep = ({ product }: IntegrateStepProps) => {
             </p>
           </div>
         </div>
-        <div className="flex flex-row gap-4">
-          {Array.from({ length: 3 }).map((_, index) => (
-            <div
-              key={index}
-              className={twMerge(
-                'dark:bg-polar-700 flex h-2 flex-1 rounded-full bg-gray-300',
-                index < 3 && 'bg-black dark:bg-white',
-              )}
-            />
-          ))}
-        </div>
-        <div className="hidden flex-col gap-y-6 md:flex">
+
+        <div className="hidden flex-col gap-y-8 md:flex">
           <div className="grid grid-cols-2 gap-4">
-            {frameworks(product).map((framework) => (
+            {parsedFrameworks.map((framework) => (
               <FrameworkCard
                 key={framework.slug}
                 {...framework}
@@ -161,60 +198,70 @@ export const IntegrateStep = ({ product }: IntegrateStepProps) => {
               />
             ))}
           </div>
-          <Link
-            href={`https://docs.polar.sh/integrate/sdk/adapters/nextjs`}
-            target="_blank"
-            className="w-full"
-          >
-            <Button size="lg" fullWidth variant="secondary">
-              <span>Explore All Adapters</span>
-              <ArrowOutwardOutlined className="ml-2" fontSize="small" />
-            </Button>
-          </Link>
+          <div className="flex flex-col gap-y-4">
+            <Link
+              href={`https://polar.sh/docs/integrate/sdk/adapters/nextjs`}
+              target="_blank"
+              className="w-full"
+            >
+              <Button size="lg" fullWidth variant="secondary">
+                <span>Explore All Adapters</span>
+                <ArrowOutwardOutlined className="ml-2" fontSize="small" />
+              </Button>
+            </Link>
+            <Link href={`/dashboard/${organization.slug}`} className="w-full">
+              <Button size="lg" fullWidth>
+                Go to Dashboard
+              </Button>
+            </Link>
+          </div>
         </div>
-        <Link href={`/dashboard/${organization.slug}`} className="w-full">
-          <Button size="lg" fullWidth>
-            Go to Dashboard
-          </Button>
-        </Link>
       </div>
       <SyntaxHighlighterProvider>
-        <div className="dark:bg-polar-800 hidden flex-1 flex-grow flex-col items-center gap-12 overflow-y-auto bg-gray-100 p-16 md:flex">
+        <div className="dark:bg-polar-950 hidden flex-1 grow flex-col items-center gap-12 overflow-y-auto bg-gray-100 p-16 md:flex">
           <div className="dark:bg-polar-900 flex w-full max-w-3xl flex-col gap-y-12 rounded-3xl bg-white p-12">
-            <div className="flex flex-col items-center gap-y-6 text-center">
-              <LogoIcon size={40} />
-              <div className="flex flex-col gap-y-4">
-                <h1 className="text-3xl">Integrate Checkout</h1>
-                <p className="dark:text-polar-500 text-lg text-gray-500">
-                  Follow the instructions below to integrate Checkout into your
-                  application.
-                </p>
-              </div>
-            </div>
-
             <div className="flex flex-col gap-y-6">
-              <h2 className="text-lg">1. Install Dependencies</h2>
+              <div className="flex flex-row items-center justify-between">
+                <h2 className="text-lg">1. Install Dependencies</h2>
+                {!isPython && (
+                  <Tabs
+                    value={packageManager}
+                    onValueChange={(v) =>
+                      setPackageManager(v as PackageManager)
+                    }
+                  >
+                    <TabsList className="dark:bg-polar-800 rounded-sm bg-gray-100 p-0.5">
+                      {packageManagers.map((pm) => (
+                        <TabsTrigger
+                          key={pm}
+                          value={pm}
+                          className="dark:data-[state=active]:bg-polar-700 !rounded-sm px-2.5 py-1 text-xs data-[state=active]:bg-white data-[state=active]:shadow-sm"
+                        >
+                          {pm}
+                        </TabsTrigger>
+                      ))}
+                    </TabsList>
+                  </Tabs>
+                )}
+              </div>
               <CodeWrapper>
-                <SyntaxHighlighterClient
-                  lang="bash"
-                  code={
-                    frameworks(product).find(
-                      (framework) => framework.slug === selectedFramework,
-                    )?.install ?? ''
-                  }
-                />
+                <SyntaxHighlighterClient lang="bash" code={installCommand} />
               </CodeWrapper>
             </div>
 
             <div className="flex flex-col gap-y-6">
               <h2 className="text-lg">2. Add Environment Variables</h2>
-              <OrganizationAccessTokensSettings organization={organization} />
+              <OrganizationAccessTokensSettings
+                organization={organization}
+                singleTokenMode
+                minimal
+                onTokenCreated={setCreatedToken}
+              />
               <CodeWrapper>
                 <SyntaxHighlighterClient
                   lang="bash"
-                  code={`# .env
-POLAR_ACCESS_TOKEN=XXX
-POLAR_SUCCESS_URL=https://my-app.com/success?checkout_id={CHECKOUT_ID}`}
+                  code={`POLAR_ACCESS_TOKEN=${createdToken ?? 'XXX'}
+POLAR_SUCCESS_URL=https://example.com/success?checkout_id={CHECKOUT_ID}`}
                 />
               </CodeWrapper>
             </div>
@@ -271,9 +318,9 @@ const FrameworkCard = ({
   return (
     <div
       className={twMerge(
-        'dark:bg-polar-800 dark:border-polar-700 flex flex-col gap-y-4 rounded-xl border border-transparent bg-gray-100 p-4',
+        'dark:bg-polar-800 dark:border-polar-700 flex cursor-pointer flex-col gap-y-4 rounded-xl border border-transparent bg-gray-100 p-4',
         active
-          ? 'shadow-3xl border-gray-100 bg-blue-500 text-white dark:bg-blue-500'
+          ? 'shadow-3xl border-gray-100 bg-black text-white dark:bg-white dark:text-black'
           : 'transition-opacity hover:opacity-70',
       )}
       role="button"

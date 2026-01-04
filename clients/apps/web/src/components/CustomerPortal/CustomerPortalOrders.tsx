@@ -3,17 +3,17 @@ import { schemas } from '@polar-sh/client'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import { DataTable } from '@polar-sh/ui/components/atoms/DataTable'
 import FormattedDateTime from '@polar-sh/ui/components/atoms/FormattedDateTime'
-import { useThemePreset } from '@polar-sh/ui/hooks/theming'
+import { getThemePreset } from '@polar-sh/ui/hooks/theming'
+import { useTheme } from 'next-themes'
 import Link from 'next/link'
 import { useState } from 'react'
-import { twMerge } from 'tailwind-merge'
 import { InlineModal } from '../Modal/InlineModal'
 import { useModal } from '../Modal/useModal'
 import { OrderStatus } from '../Orders/OrderStatus'
 import CustomerPortalOrder from './CustomerPortalOrder'
 
 export interface CustomerPortalOrdersProps {
-  organization: schemas['Organization']
+  organization: schemas['CustomerOrganization']
   orders: schemas['CustomerOrder'][]
   customerSessionToken: string
 }
@@ -25,13 +25,15 @@ export const CustomerPortalOrders = ({
 }: CustomerPortalOrdersProps) => {
   const api = createClientSideAPI(customerSessionToken)
 
-  const themingPreset = useThemePreset(
-    organization.slug === 'midday' ? 'midday' : 'polar',
-  )
-
   const [selectedOrder, setSelectedOrder] = useState<
     schemas['CustomerOrder'] | null
   >(null)
+
+  const theme = useTheme()
+  const themingPreset = getThemePreset(
+    organization.slug,
+    theme.resolvedTheme as 'light' | 'dark',
+  )
 
   const {
     isShown: isOrderModalOpen,
@@ -45,21 +47,18 @@ export const CustomerPortalOrders = ({
         <h3 className="text-xl">Order History</h3>
       </div>
       <DataTable
-        wrapperClassName={themingPreset.polar.table}
-        headerClassName={themingPreset.polar.tableHeader}
         data={orders ?? []}
         isLoading={false}
         columns={[
           {
-            accessorKey: 'product.name',
-            header: 'Product',
-            cell: ({ row }) => row.original.product.name,
+            accessorKey: 'description',
+            header: 'Description',
           },
           {
             accessorKey: 'status',
             header: 'Status',
             cell: ({ row }) => (
-              <span className="flex flex-shrink">
+              <span className="flex shrink">
                 <OrderStatus status={row.original.status} />
               </span>
             ),
@@ -78,36 +77,33 @@ export const CustomerPortalOrders = ({
           {
             accessorKey: 'id',
             header: '',
-            cell: ({ row }) => (
-              <span className="flex justify-end">
-                <Button
-                  variant="secondary"
-                  onClick={() => {
-                    setSelectedOrder(row.original)
-                    showOrderModal()
-                  }}
-                  className={twMerge(
-                    'hidden md:flex',
-                    themingPreset.polar.buttonSecondary,
-                  )}
-                  size="sm"
-                >
-                  View Order
-                </Button>
-                <Link
-                  className="md:hidden"
-                  href={`/${organization.slug}/portal/orders/${row.original.id}?customer_session_token=${customerSessionToken}`}
-                >
+            cell: ({ row }) => {
+              const order = row.original
+
+              return (
+                <span className="flex justify-end gap-2">
                   <Button
                     variant="secondary"
+                    onClick={() => {
+                      setSelectedOrder(order)
+                      showOrderModal()
+                    }}
+                    className="hidden md:flex"
                     size="sm"
-                    className={twMerge(themingPreset.polar.buttonSecondary)}
                   >
                     View Order
                   </Button>
-                </Link>
-              </span>
-            ),
+                  <Link
+                    className="md:hidden"
+                    href={`/${organization.slug}/portal/orders/${order.id}?customer_session_token=${customerSessionToken}`}
+                  >
+                    <Button variant="secondary" size="sm">
+                      View Order
+                    </Button>
+                  </Link>
+                </span>
+              )
+            },
           },
         ]}
       />

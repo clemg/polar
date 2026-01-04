@@ -1,4 +1,4 @@
-import { queryClient } from '@/utils/api/query'
+import { getQueryClient } from '@/utils/api/query'
 import { api } from '@/utils/client'
 import { schemas, unwrap } from '@polar-sh/client'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -9,13 +9,23 @@ type FileRead =
   | schemas['ProductMediaFileRead']
   | schemas['OrganizationAvatarFileRead']
 
-export const useFiles = (organizationId: string, fileIds: string[]) =>
+export const useFiles = (
+  organizationId: string,
+  fileIds: string[],
+  options?: { limit?: number },
+) =>
   useQuery({
     queryKey: ['user', 'files', JSON.stringify(fileIds)],
     queryFn: () =>
       unwrap(
         api.GET('/v1/files/', {
-          params: { query: { organization_id: organizationId, ids: fileIds } },
+          params: {
+            query: {
+              organization_id: organizationId,
+              ids: fileIds,
+              limit: options?.limit ?? fileIds.length,
+            },
+          },
         }),
       ).then((response) => {
         const files = response.items.reduce<Record<string, FileRead>>(
@@ -41,7 +51,7 @@ export const usePatchFile = (
 ) =>
   useMutation({
     mutationFn: ({ name, version }: { name?: string; version?: string }) => {
-      let patch: {
+      const patch: {
         name?: string
         version?: string
       } = {}
@@ -66,7 +76,7 @@ export const usePatchFile = (
       if (onSuccessCallback) {
         onSuccessCallback(response.data)
       }
-      queryClient.invalidateQueries({ queryKey: ['user', 'files'] })
+      getQueryClient().invalidateQueries({ queryKey: ['user', 'files'] })
     },
   })
 
@@ -86,6 +96,6 @@ export const useDeleteFile = (id: string, onSuccessCallback?: () => void) =>
       if (onSuccessCallback) {
         onSuccessCallback()
       }
-      queryClient.invalidateQueries({ queryKey: ['user', 'files'] })
+      getQueryClient().invalidateQueries({ queryKey: ['user', 'files'] })
     },
   })

@@ -1,10 +1,10 @@
 import inspect
 import re
-from typing import Annotated, Any, TypeAlias, TypeVar
+from typing import Annotated, Any
 
 from fastapi import Depends, Request
 from pydantic import AliasChoices, BaseModel, Field, StringConstraints
-from sqlalchemy import ColumnExpressionArgument, Select, and_, or_
+from sqlalchemy import ColumnExpressionArgument, Select, and_, or_, true
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -66,7 +66,7 @@ class MetadataInputMixin(BaseModel):
     )
 
 
-MetadataOutputType: TypeAlias = dict[str, str | int | float | bool]
+type MetadataOutputType = dict[str, str | int | float | bool]
 
 
 class MetadataOutputMixin(BaseModel):
@@ -134,10 +134,8 @@ def _get_metadata_query(request: Request) -> dict[str, list[str]] | None:
 
 MetadataQuery = Annotated[dict[str, list[str]], Depends(_get_metadata_query)]
 
-M = TypeVar("M", bound=MetadataMixin)
 
-
-def get_metadata_clause(  # noqa: UP047
+def get_metadata_clause[M: MetadataMixin](
     model: type[M], query: MetadataQuery
 ) -> ColumnExpressionArgument[bool]:
     clauses: list[ColumnExpressionArgument[bool]] = []
@@ -146,11 +144,44 @@ def get_metadata_clause(  # noqa: UP047
         for value in values:
             sub_clauses.append(model.user_metadata[key].as_string() == value)
         clauses.append(or_(*sub_clauses))
+
+    if not clauses:
+        return true()
+
     return and_(*clauses)
 
 
-def apply_metadata_clause(
+def apply_metadata_clause[M: MetadataMixin](
     model: type[M], statement: Select[tuple[M]], query: MetadataQuery
 ) -> Select[tuple[M]]:
     clause = get_metadata_clause(model, query)
     return statement.where(clause)
+
+
+def extract_metadata_value(
+    metadata: dict[str, Any], property_selector: str
+) -> str | None:
+    """
+    Extract a value from metadata using a property selector.
+
+    Supports:
+    - Simple keys: "subject" -> metadata["subject"]
+    - Nested keys: "metadata.subject" -> metadata["metadata"]["subject"]
+    - Dot-separated paths of any depth
+
+    Returns the value as a string if found, None otherwise.
+    """
+    if not property_selector:
+        return None
+
+    keys = property_selector.split(".")
+    current: Any = metadata
+
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+        if current is None:
+            return None
+
+    return str(current) if current is not None else None

@@ -1,6 +1,5 @@
-import math
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, Uuid
@@ -12,15 +11,16 @@ from polar.enums import AccountType
 from polar.kit.address import Address, AddressType
 from polar.kit.db.models import RecordModel
 from polar.kit.extensions.sqlalchemy import StringEnum
+from polar.kit.math import polar_round
 
 if TYPE_CHECKING:
     from .organization import Organization
     from .user import User
 
 
-FeeBasisPoints: TypeAlias = int
-FeeFixedCents: TypeAlias = int
-Fees: TypeAlias = tuple[FeeBasisPoints, FeeFixedCents]
+type FeeBasisPoints = int
+type FeeFixedCents = int
+type Fees = tuple[FeeBasisPoints, FeeFixedCents]
 
 
 class Account(RecordModel):
@@ -116,8 +116,22 @@ class Account(RecordModel):
         )
 
     @declared_attr
-    def organizations(cls) -> Mapped[list["Organization"]]:
+    def all_organizations(cls) -> Mapped[list["Organization"]]:
         return relationship("Organization", lazy="raise", back_populates="account")
+
+    @declared_attr
+    def organizations(cls) -> Mapped[list["Organization"]]:
+        return relationship(
+            "Organization",
+            lazy="raise",
+            primaryjoin=(
+                "and_("
+                "Organization.account_id == Account.id,"
+                "Organization.deleted_at.is_(None)"
+                ")"
+            ),
+            viewonly=True,
+        )
 
     def is_active(self) -> bool:
         return self.status == Account.Status.ACTIVE
@@ -157,8 +171,4 @@ class Account(RecordModel):
         basis_points, fixed = self.platform_fee
         fee_in_cents = (amount_in_cents * (basis_points / 10_000)) + fixed
         # Apply same logic as Stripe fee rounding
-        return (
-            math.ceil(fee_in_cents)
-            if fee_in_cents - int(fee_in_cents) >= 0.5
-            else math.floor(fee_in_cents)
-        )
+        return polar_round(fee_in_cents)

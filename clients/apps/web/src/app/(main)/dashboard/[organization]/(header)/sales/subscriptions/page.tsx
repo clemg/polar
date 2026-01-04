@@ -2,7 +2,7 @@ import { getServerSideAPI } from '@/utils/client/serverside'
 import { DataTableSearchParams, parseSearchParams } from '@/utils/datatable'
 import { getOrganizationBySlugOrNotFound } from '@/utils/organization'
 import { Metadata } from 'next'
-import ClientPage from './ClientPage'
+import SubscriptionsPage from './SubscriptionsPage'
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -10,18 +10,20 @@ export async function generateMetadata(): Promise<Metadata> {
   }
 }
 
-export default async function Page({
-  params,
-  searchParams,
-}: {
-  params: { organization: string }
-  searchParams: DataTableSearchParams & {
-    product_id?: string
-    status?: 'active' | 'canceled' | 'any'
-    metadata?: string[]
-  }
+export default async function Page(props: {
+  params: Promise<{ organization: string }>
+  searchParams: Promise<
+    DataTableSearchParams & {
+      product_id?: string
+      status?: 'active' | 'canceled' | 'any'
+      cancel_at_period_end?: 'all' | 'true' | 'false'
+      metadata?: string[]
+    }
+  >
 }) {
-  const api = getServerSideAPI()
+  const searchParams = await props.searchParams
+  const params = await props.params
+  const api = await getServerSideAPI()
   const organization = await getOrganizationBySlugOrNotFound(
     api,
     params.organization,
@@ -40,12 +42,13 @@ export default async function Page({
     : undefined
 
   return (
-    <ClientPage
+    <SubscriptionsPage
       organization={organization}
       pagination={pagination}
       sorting={sorting}
       productId={searchParams.product_id}
       subscriptionStatus={searchParams.status ?? 'active'}
+      cancelAtPeriodEnd={searchParams.cancel_at_period_end ?? 'all'}
       metadata={metadata}
     />
   )

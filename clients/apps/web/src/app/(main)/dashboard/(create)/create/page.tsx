@@ -4,7 +4,7 @@ import { getAuthenticatedUser } from '@/utils/user'
 import { schemas } from '@polar-sh/client'
 import { Metadata } from 'next'
 import { redirect } from 'next/navigation'
-import ClientPage from './ClientPage'
+import CreatePage from './CreatePage'
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -12,17 +12,23 @@ export async function generateMetadata(): Promise<Metadata> {
   }
 }
 
-export default async function Page({
-  searchParams: { slug, auto },
-}: {
-  searchParams: { slug?: string; auto?: string }
+export default async function Page(props: {
+  searchParams: Promise<{
+    slug?: string
+    auto?: string
+    existing_org?: boolean
+  }>
 }) {
+  const searchParams = await props.searchParams
+
+  const { slug, auto, existing_org } = searchParams
+
   let validationErrors: schemas['ValidationError'][] = []
-  let error: string | undefined = undefined
+  const error: string | undefined = undefined
 
   // Create the organization automatically if the slug is provided and auto is true
   if (auto === 'true' && slug) {
-    const api = getServerSideAPI()
+    const api = await getServerSideAPI()
     const { data: organization, error } = await api.POST('/v1/organizations/', {
       body: {
         name: slug,
@@ -37,10 +43,16 @@ export default async function Page({
       await revalidate(`organizations:${organization.slug}`)
       await revalidate(`storefront:${organization.slug}`)
       const currentUser = await getAuthenticatedUser()
-      await revalidate(`users:${currentUser?.id}:organizations`)
+      await revalidate(`users:${currentUser?.id}:organizations`, { expire: 0 })
       return redirect(`/dashboard/${organization.slug}/onboarding/product`)
     }
   }
 
-  return <ClientPage validationErrors={validationErrors} error={error} />
+  return (
+    <CreatePage
+      hasExistingOrg={!!existing_org}
+      validationErrors={validationErrors}
+      error={error}
+    />
+  )
 }

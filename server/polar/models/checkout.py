@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -21,29 +22,35 @@ from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, Mapper, declared_attr, mapped_column, relationship
 
 from polar.config import settings
-from polar.custom_field.attachment import AttachedCustomFieldMixin
 from polar.custom_field.data import CustomFieldDataMixin
 from polar.enums import PaymentProcessor
 from polar.kit.address import Address, AddressType
 from polar.kit.db.models import RecordModel
 from polar.kit.metadata import MetadataColumn, MetadataMixin
 from polar.kit.tax import TaxID, TaxIDType
+from polar.kit.trial import TrialConfigurationMixin, TrialInterval
 from polar.kit.utils import utc_now
-from polar.product.guard import is_discount_applicable, is_free_price, is_metered_price
+from polar.product.guard import (
+    is_discount_applicable,
+    is_free_price,
+    is_metered_price,
+)
 
 from .customer import Customer
 from .discount import Discount
 from .organization import Organization
 from .product import Product
-from .product_price import ProductPrice
+from .product_price import ProductPrice, ProductPriceSeatUnit
 from .subscription import Subscription
 
 if TYPE_CHECKING:
+    from polar.custom_field.attachment import AttachedCustomFieldMixin
+
     from .checkout_product import CheckoutProduct
 
 
 def get_expires_at() -> datetime:
-    return utc_now() + timedelta(seconds=settings.MAGIC_LINK_TTL_SECONDS)
+    return utc_now() + timedelta(seconds=settings.CHECKOUT_TTL_SECONDS)
 
 
 class CheckoutStatus(StrEnum):
@@ -82,7 +89,9 @@ class CheckoutBillingAddressFields(TypedDict):
     line2: BillingAddressFieldMode
 
 
-class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
+class Checkout(
+    TrialConfigurationMixin, CustomFieldDataMixin, MetadataMixin, RecordModel
+):
     __tablename__ = "checkouts"
 
     payment_processor: Mapped[PaymentProcessor] = mapped_column(
@@ -100,6 +109,7 @@ class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
     payment_processor_metadata: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict
     )
+    return_url: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
     _success_url: Mapped[str | None] = mapped_column(
         "success_url", String, nullable=True, default=None
     )
@@ -113,45 +123,58 @@ class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
 
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    seats: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
 
     tax_amount: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     tax_processor_id: Mapped[str | None] = mapped_column(
         String, nullable=True, default=None
     )
 
-    product_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("products.id", ondelete="cascade"), nullable=False
+    # TODO: proper data migration to make it non-nullable
+    allow_trial: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True, default=True
+    )
+    trial_end: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True, default=None
+    )
+
+    organization_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("organizations.id", ondelete="cascade"),
+        nullable=False,
+        index=True,
     )
 
     @declared_attr
-    def product(cls) -> Mapped[Product]:
-        # Eager loading makes sense here because we always need the product
-        return relationship(Product, lazy="joined")
+    def organization(cls) -> Mapped["Organization"]:
+        return relationship("Organization", lazy="raise")
 
-    product_price_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("product_prices.id", ondelete="cascade"), nullable=False
+    product_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("products.id", ondelete="cascade"), nullable=True
     )
 
     @declared_attr
-    def product_price(cls) -> Mapped[ProductPrice]:
-        # Eager loading makes sense here because we always need the price
-        return relationship(ProductPrice, lazy="joined")
+    def product(cls) -> Mapped[Product | None]:
+        return relationship(Product, lazy="raise")
+
+    product_price_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("product_prices.id", ondelete="cascade"), nullable=True
+    )
+
+    @declared_attr
+    def product_price(cls) -> Mapped[ProductPrice | None]:
+        return relationship(ProductPrice, lazy="raise")
 
     checkout_products: Mapped[list["CheckoutProduct"]] = relationship(
         "CheckoutProduct",
         back_populates="checkout",
         cascade="all, delete-orphan",
         order_by="CheckoutProduct.order",
-        # Products are almost always needed, so eager loading makes sense
-        lazy="selectin",
+        lazy="raise",
     )
 
     products: AssociationProxy[list["Product"]] = association_proxy(
         "checkout_products", "product"
-    )
-
-    organization: AssociationProxy[Organization] = association_proxy(
-        "product", "organization"
     )
 
     discount_id: Mapped[UUID | None] = mapped_column(
@@ -160,8 +183,7 @@ class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
 
     @declared_attr
     def discount(cls) -> Mapped[Discount | None]:
-        # Eager loading makes sense here because we always need the discount when present
-        return relationship(Discount, lazy="joined")
+        return relationship(Discount, lazy="raise")
 
     customer_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("customers.id", ondelete="set null"), nullable=True
@@ -197,6 +219,8 @@ class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
     )
     customer_metadata: Mapped[MetadataColumn]
 
+    # Only set when a checkout is attached to an existing subscription (free-to-paid upgrades).
+    # For subscriptions created by the checkout itself, see `Subscription.checkout_id`.
     subscription_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("subscriptions.id", ondelete="set null"), nullable=True
     )
@@ -205,7 +229,7 @@ class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
     def subscription(cls) -> Mapped[Subscription | None]:
         return relationship(
             Subscription,
-            lazy="joined",
+            lazy="raise",
             foreign_keys=[cls.subscription_id],  # type: ignore
         )
 
@@ -259,23 +283,35 @@ class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
 
     @property
     def is_discount_applicable(self) -> bool:
-        return any(is_discount_applicable(price) for price in self.product.prices)
+        if self.product_prices is None:
+            return False
+        return any(is_discount_applicable(price) for price in self.product_prices)
 
     @property
     def is_free_product_price(self) -> bool:
-        return all(is_free_price(price) for price in self.product.prices)
+        if self.product_prices is None:
+            return False
+        return all(is_free_price(price) for price in self.product_prices)
 
     @property
     def has_metered_prices(self) -> bool:
-        return any(is_metered_price(price) for price in self.product.prices)
+        if self.product_prices is None:
+            return False
+        return any(is_metered_price(price) for price in self.product_prices)
 
     @property
     def is_payment_required(self) -> bool:
-        return self.total_amount > 0
+        return self.total_amount > 0 and self.trial_end is None
 
     @property
     def is_payment_setup_required(self) -> bool:
+        if self.product is None:
+            return False
         return self.product.is_recurring and not self.is_free_product_price
+
+    @property
+    def should_save_payment_method(self) -> bool:
+        return self.product is not None and self.product.is_recurring
 
     @property
     def is_payment_form_required(self) -> bool:
@@ -293,9 +329,9 @@ class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
     def customer_session_token(self, value: str) -> None:
         self._customer_session_token = value
 
-    attached_custom_fields: AssociationProxy[Sequence["AttachedCustomFieldMixin"]] = (
-        association_proxy("product", "attached_custom_fields")
-    )
+    attached_custom_fields: AssociationProxy[
+        Sequence["AttachedCustomFieldMixin"] | None
+    ] = association_proxy("product", "attached_custom_fields")
 
     @property
     def customer_billing_address_fields(self) -> CheckoutCustomerBillingAddressFields:
@@ -307,7 +343,7 @@ class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
         )
         return {
             "country": True,
-            "state": require_billing_address or country in {"US", "CA"},
+            "state": country in {"US", "CA"},
             "line1": require_billing_address,
             "line2": False,
             "city": require_billing_address,
@@ -325,8 +361,12 @@ class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
         return {
             "country": BillingAddressFieldMode.required,
             "state": BillingAddressFieldMode.required
-            if require_billing_address or country in {"US", "CA"}
-            else BillingAddressFieldMode.disabled,
+            if country in {"US", "CA"}
+            else (
+                BillingAddressFieldMode.optional
+                if require_billing_address
+                else BillingAddressFieldMode.disabled
+            ),
             "line1": BillingAddressFieldMode.required
             if require_billing_address
             else BillingAddressFieldMode.disabled,
@@ -340,6 +380,54 @@ class Checkout(CustomFieldDataMixin, MetadataMixin, RecordModel):
             if require_billing_address
             else BillingAddressFieldMode.disabled,
         }
+
+    @property
+    def active_trial_interval(self) -> TrialInterval | None:
+        if not self.allow_trial:
+            return None
+        if self.product is None:
+            return None
+        return self.trial_interval or self.product.trial_interval
+
+    @property
+    def active_trial_interval_count(self) -> int | None:
+        if not self.allow_trial:
+            return None
+        if self.product is None:
+            return None
+        return self.trial_interval_count or self.product.trial_interval_count
+
+    @property
+    def price_per_seat(self) -> int | None:
+        if not isinstance(self.product_price, ProductPriceSeatUnit):
+            return None
+
+        if self.seats is None:
+            return None
+
+        return self.product_price.get_price_per_seat(self.seats)
+
+    @property
+    def description(self) -> str:
+        if self.product is not None:
+            return f"{self.organization.name} — {self.product.name}"
+        raise NotImplementedError()
+
+    @property
+    def prices(self) -> dict[uuid.UUID, list[ProductPrice]]:
+        prices: dict[uuid.UUID, list[ProductPrice]] = {}
+        for checkout_product in self.checkout_products:
+            if checkout_product.ad_hoc_prices:
+                prices[checkout_product.product_id] = checkout_product.ad_hoc_prices
+            else:
+                prices[checkout_product.product_id] = checkout_product.product.prices
+        return prices
+
+    @property
+    def product_prices(self) -> list[ProductPrice] | None:
+        if self.product_id is None:
+            return None
+        return self.prices[self.product_id]
 
 
 @event.listens_for(Checkout, "before_update")

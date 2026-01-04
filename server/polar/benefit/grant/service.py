@@ -1,3 +1,4 @@
+import builtins
 from collections.abc import Sequence
 from typing import Any, Literal, TypeVar, Unpack, overload
 from uuid import UUID
@@ -13,8 +14,9 @@ from polar.eventstream.service import publish as eventstream_publish
 from polar.exceptions import PolarError
 from polar.kit.pagination import PaginationParams, paginate
 from polar.kit.services import ResourceServiceReader
+from polar.kit.sorting import Sorting
 from polar.logging import Logger
-from polar.models import Benefit, BenefitGrant, Customer, Product
+from polar.models import Benefit, BenefitGrant, Customer, Member, Product
 from polar.models.benefit_grant import BenefitGrantScope
 from polar.models.webhook_endpoint import WebhookEventType
 from polar.postgres import AsyncSession, sql
@@ -30,6 +32,7 @@ from ..strategies import (
 )
 from .repository import BenefitGrantRepository
 from .scope import scope_to_args
+from .sorting import BenefitGrantSortProperty
 
 log: Logger = structlog.get_logger()
 
@@ -37,12 +40,6 @@ BG = TypeVar("BG", bound=BenefitGrant)
 
 
 class BenefitGrantError(PolarError): ...
-
-
-class EmptyScopeError(BenefitGrantError):
-    def __init__(self) -> None:
-        message = "A scope must be provided to retrieve a benefit grant."
-        super().__init__(message, 500)
 
 
 class BenefitGrantService(ResourceServiceReader[BenefitGrant]):
@@ -106,6 +103,7 @@ class BenefitGrantService(ResourceServiceReader[BenefitGrant]):
         *,
         is_granted: bool | None = None,
         customer_id: Sequence[UUID] | None = None,
+        member_id: Sequence[UUID] | None = None,
         pagination: PaginationParams,
     ) -> tuple[Sequence[BenefitGrant], int]:
         statement = (
@@ -117,6 +115,7 @@ class BenefitGrantService(ResourceServiceReader[BenefitGrant]):
             .order_by(BenefitGrant.created_at.desc())
             .options(
                 joinedload(BenefitGrant.customer),
+                joinedload(BenefitGrant.benefit),
             )
         )
 
@@ -126,7 +125,48 @@ class BenefitGrantService(ResourceServiceReader[BenefitGrant]):
         if customer_id is not None:
             statement = statement.where(BenefitGrant.customer_id.in_(customer_id))
 
+        if member_id is not None:
+            statement = statement.where(BenefitGrant.member_id.in_(member_id))
+
         return await paginate(session, statement, pagination=pagination)
+
+    async def list_by_organization(
+        self,
+        session: AsyncSession,
+        organization_id: UUID,
+        *,
+        is_granted: bool | None = None,
+        customer_id: Sequence[UUID] | None = None,
+        pagination: PaginationParams,
+        sorting: builtins.list[Sorting[BenefitGrantSortProperty]] = [
+            (BenefitGrantSortProperty.created_at, True)
+        ],
+    ) -> tuple[Sequence[BenefitGrant], int]:
+        repository = BenefitGrantRepository.from_session(session)
+        statement = (
+            select(BenefitGrant)
+            .join(Benefit, BenefitGrant.benefit_id == Benefit.id)
+            .where(
+                Benefit.organization_id == organization_id,
+                BenefitGrant.deleted_at.is_(None),
+            )
+            .options(
+                joinedload(BenefitGrant.customer),
+                joinedload(BenefitGrant.benefit).joinedload(Benefit.organization),
+            )
+        )
+
+        if is_granted is not None:
+            statement = statement.where(BenefitGrant.is_granted.is_(is_granted))
+
+        if customer_id is not None:
+            statement = statement.where(BenefitGrant.customer_id.in_(customer_id))
+
+        statement = repository.apply_sorting(statement, sorting)
+
+        return await repository.paginate(
+            statement, limit=pagination.limit, page=pagination.page
+        )
 
     async def grant_benefit(
         self,
@@ -135,19 +175,29 @@ class BenefitGrantService(ResourceServiceReader[BenefitGrant]):
         customer: Customer,
         benefit: Benefit,
         *,
+        member: Member | None = None,
         attempt: int = 1,
         **scope: Unpack[BenefitGrantScope],
     ) -> BenefitGrant:
         log.info(
-            "Granting benefit", benefit_id=str(benefit.id), customer_id=str(customer.id)
+            "Granting benefit",
+            benefit_id=str(benefit.id),
+            customer_id=str(customer.id),
+            member_id=str(member.id) if member else None,
         )
 
         repository = BenefitGrantRepository.from_session(session)
-        grant = await repository.get_by_benefit_and_scope(customer, benefit, **scope)
+        grant = await repository.get_by_benefit_and_scope(
+            customer, benefit, member=member, **scope
+        )
 
         if grant is None:
             grant = BenefitGrant(
-                customer=customer, benefit=benefit, properties={}, **scope
+                customer=customer,
+                benefit=benefit,
+                member=member,
+                properties={},
+                **scope,
             )
             session.add(grant)
         elif grant.is_granted:
@@ -214,19 +264,29 @@ class BenefitGrantService(ResourceServiceReader[BenefitGrant]):
         customer: Customer,
         benefit: Benefit,
         *,
+        member: Member | None = None,
         attempt: int = 1,
         **scope: Unpack[BenefitGrantScope],
     ) -> BenefitGrant:
         log.info(
-            "Revoking benefit", benefit_id=str(benefit.id), customer_id=str(customer.id)
+            "Revoking benefit",
+            benefit_id=str(benefit.id),
+            customer_id=str(customer.id),
+            member_id=str(member.id) if member else None,
         )
 
         repository = BenefitGrantRepository.from_session(session)
-        grant = await repository.get_by_benefit_and_scope(customer, benefit, **scope)
+        grant = await repository.get_by_benefit_and_scope(
+            customer, benefit, member=member, **scope
+        )
 
         if grant is None:
             grant = BenefitGrant(
-                customer=customer, benefit=benefit, properties={}, **scope
+                customer=customer,
+                benefit=benefit,
+                member=member,
+                properties={},
+                **scope,
             )
             session.add(grant)
         elif grant.is_revoked:
@@ -301,26 +361,52 @@ class BenefitGrantService(ResourceServiceReader[BenefitGrant]):
         task: Literal["grant", "revoke"],
         customer: Customer,
         product: Product,
+        member_id: UUID | None = None,
         **scope: Unpack[BenefitGrantScope],
     ) -> None:
-        # Get granted benefits that are not part of this product.
-        # It happens if the subscription has been upgraded/downgraded.
         repository = BenefitGrantRepository.from_session(session)
-        outdated_grants = await repository.list_outdated_grants(product, **scope)
 
-        for benefit in product.benefits:
+        # Get existing grants for this customer and scope to avoid redundant jobs
+        existing_grants = await repository.list_by_customer_and_scope(customer, **scope)
+        granted_benefit_ids = {g.benefit_id for g in existing_grants if g.is_granted}
+        # Don't retry grants that failed due to required customer action -
+        # they should only be retried when the customer takes that action
+        errored_benefit_ids = {
+            g.benefit_id
+            for g in existing_grants
+            if g.error and g.error.get("type") == BenefitActionRequiredError.__name__
+        }
+
+        if task == "grant":
+            benefits_to_process = [
+                b
+                for b in product.benefits
+                if b.id not in granted_benefit_ids and b.id not in errored_benefit_ids
+            ]
+        else:
+            # Only revoke benefits that are actually granted
+            benefits_to_process = [
+                b for b in product.benefits if b.id in granted_benefit_ids
+            ]
+
+        for benefit in benefits_to_process:
             enqueue_job(
                 f"benefit.{task}",
                 customer_id=customer.id,
                 benefit_id=benefit.id,
+                member_id=member_id,
                 **scope_to_args(scope),
             )
 
+        # Get granted benefits that are not part of this product.
+        # It happens if the subscription has been upgraded/downgraded.
+        outdated_grants = await repository.list_outdated_grants(product, **scope)
         for outdated_grant in outdated_grants:
             enqueue_job(
                 "benefit.revoke",
                 customer_id=customer.id,
                 benefit_id=outdated_grant.benefit_id,
+                member_id=member_id,
                 **scope_to_args(scope),
             )
 

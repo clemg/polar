@@ -5,8 +5,10 @@ import uuid
 from collections.abc import AsyncIterator, Coroutine
 from typing import Any
 
+import httpx
 import pycountry
 import pycountry.db
+import structlog
 from babel.numbers import format_currency
 from plain_client import (
     ComponentContainerContentInput,
@@ -26,20 +28,20 @@ from plain_client import (
     CreateThreadInput,
     CustomerIdentifierInput,
     EmailAddressInput,
-    OptionalStringInput,
     Plain,
+    ThreadsFilter,
     UpsertCustomerIdentifierInput,
     UpsertCustomerInput,
     UpsertCustomerOnCreateInput,
     UpsertCustomerOnUpdateInput,
+    UpsertCustomerUpsertCustomer,
 )
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import contains_eager
 
 from polar.config import settings
 from polar.exceptions import PolarError
 from polar.models import (
-    Account,
     Customer,
     Order,
     Organization,
@@ -47,6 +49,8 @@ from polar.models import (
     User,
     UserOrganization,
 )
+from polar.models.organization import OrganizationStatus
+from polar.models.organization_review import OrganizationReview
 from polar.postgres import AsyncSession
 from polar.user.repository import UserRepository
 
@@ -56,6 +60,8 @@ from .schemas import (
     CustomerCardsRequest,
     CustomerCardsResponse,
 )
+
+log = structlog.get_logger(__name__)
 
 
 class PlainServiceError(PolarError): ...
@@ -76,6 +82,12 @@ class AccountReviewThreadCreationError(PlainServiceError):
         )
 
 
+class NoUserFoundError(PlainServiceError):
+    def __init__(self, organization_id: uuid.UUID) -> None:
+        self.organization_id = organization_id
+        super().__init__(f"No user found for organization {organization_id}")
+
+
 _card_getter_semaphore = asyncio.Semaphore(3)
 
 
@@ -87,6 +99,8 @@ async def _card_getter_task(
 
 
 class PlainService:
+    enabled = settings.PLAIN_TOKEN is not None
+
     async def get_cards(
         self, session: AsyncSession, request: CustomerCardsRequest
     ) -> CustomerCardsResponse:
@@ -116,17 +130,30 @@ class PlainService:
                         _card_getter_task(self._get_order_card(session, request))
                     )
                 )
+            if CustomerCardKey.snippets in request.cardKeys:
+                tasks.append(
+                    tg.create_task(
+                        _card_getter_task(self._get_snippets_card(session, request))
+                    )
+                )
 
         cards = [card for task in tasks if (card := task.result()) is not None]
         return CustomerCardsResponse(cards=cards)
 
-    async def create_account_review_thread(
-        self, session: AsyncSession, account: Account
+    async def create_organization_review_thread(
+        self, session: AsyncSession, organization: Organization
     ) -> None:
+        if not self.enabled:
+            return
+
         user_repository = UserRepository.from_session(session)
-        admin = await user_repository.get_by_id(account.admin_id)
+        if organization.account is None:
+            from polar.organization.tasks import OrganizationAccountNotSet
+
+            raise OrganizationAccountNotSet(organization.id)
+        admin = await user_repository.get_by_id(organization.account.admin_id)
         if admin is None:
-            raise AccountAdminDoesNotExistError(account.id)
+            raise AccountAdminDoesNotExistError(organization.account.admin_id)
 
         async with self._get_plain_client() as plain:
             customer_result = await plain.upsert_customer(
@@ -140,7 +167,6 @@ class PlainService:
                         ),
                     ),
                     on_update=UpsertCustomerOnUpdateInput(
-                        external_id=OptionalStringInput(value=str(admin.id)),
                         email=EmailAddressInput(
                             email=admin.email, is_verified=admin.email_verified
                         ),
@@ -149,20 +175,28 @@ class PlainService:
             )
             if customer_result.error is not None:
                 raise AccountReviewThreadCreationError(
-                    account.id, customer_result.error.message
+                    organization.account.id, customer_result.error.message
                 )
+
+            match organization.status:
+                case OrganizationStatus.INITIAL_REVIEW:
+                    title = "Initial Account Review"
+                case OrganizationStatus.ONGOING_REVIEW:
+                    title = "Ongoing Account Review"
+                case _:
+                    raise ValueError("Organization is not under review")
 
             thread_result = await plain.create_thread(
                 CreateThreadInput(
-                    customer_identifier=CustomerIdentifierInput(
-                        external_id=str(admin.id)
+                    customer_identifier=self._get_customer_identifier(
+                        customer_result, admin.email
                     ),
-                    title="Account Review",
+                    title=title,
                     label_type_ids=["lt_01JFG7F4N67FN3MAWK06FJ8FPG"],
                     components=[
                         ComponentInput(
                             component_text=ComponentTextInput(
-                                text=f"The account `{account.id}` should be reviewed, as it hit a threshold. It's used by the following organizations:"
+                                text=f"The organization `{organization.slug}` should be reviewed, as it hit a threshold."
                             )
                         ),
                         ComponentInput(
@@ -172,26 +206,260 @@ class PlainService:
                         ),
                         ComponentInput(
                             component_link_button=ComponentLinkButtonInput(
-                                link_button_url=settings.generate_external_url(
-                                    f"/backoffice/organizations/{account.organizations[0].id}"
+                                link_button_url=settings.generate_backoffice_url(
+                                    f"/organizations-v2/{organization.id}"
                                 ),
-                                link_button_label="Review account ↗",
+                                link_button_label="Review organization ↗",
                             )
-                        ),
-                        *(
-                            ComponentInput(
-                                component_container=self._get_organization_component_container(
-                                    organization
-                                )
-                            )
-                            for organization in account.organizations
                         ),
                     ],
                 )
             )
             if thread_result.error is not None:
                 raise AccountReviewThreadCreationError(
-                    account.id, thread_result.error.message
+                    organization.account.id, thread_result.error.message
+                )
+
+    async def create_appeal_review_thread(
+        self,
+        session: AsyncSession,
+        organization: Organization,
+        review: OrganizationReview,
+    ) -> None:
+        """Create Plain ticket for organization appeal review."""
+        if not self.enabled:
+            return
+
+        user_repository = UserRepository.from_session(session)
+        users = await user_repository.get_all_by_organization(organization.id)
+        if len(users) == 0:
+            raise NoUserFoundError(organization.id)
+        user = users[0]
+
+        # Create Plain ticket for appeal review
+        async with self._get_plain_client() as plain:
+            customer_result = await plain.upsert_customer(
+                UpsertCustomerInput(
+                    identifier=UpsertCustomerIdentifierInput(email_address=user.email),
+                    on_create=UpsertCustomerOnCreateInput(
+                        external_id=str(user.id),
+                        full_name=user.email,
+                        email=EmailAddressInput(
+                            email=user.email, is_verified=user.email_verified
+                        ),
+                    ),
+                    on_update=UpsertCustomerOnUpdateInput(
+                        email=EmailAddressInput(
+                            email=user.email, is_verified=user.email_verified
+                        ),
+                    ),
+                )
+            )
+
+            if customer_result.error is not None:
+                raise AccountReviewThreadCreationError(
+                    user.id, customer_result.error.message
+                )
+
+            # Create the thread with detailed appeal information
+            thread_result = await plain.create_thread(
+                CreateThreadInput(
+                    customer_identifier=self._get_customer_identifier(
+                        customer_result, user.email
+                    ),
+                    title=f"Organization Appeal - {organization.slug}",
+                    label_type_ids=["lt_01K3QWYTDV7RSS7MM2RC584X41"],
+                    components=[
+                        ComponentInput(
+                            component_text=ComponentTextInput(
+                                text=f"The organization `{organization.slug}` has submitted an appeal for review after AI validation {review.verdict}."
+                            )
+                        ),
+                        ComponentInput(
+                            component_container=ComponentContainerInput(
+                                container_content=[
+                                    ComponentContainerContentInput(
+                                        component_text=ComponentTextInput(
+                                            text=organization.name or organization.slug
+                                        )
+                                    ),
+                                    ComponentContainerContentInput(
+                                        component_divider=ComponentDividerInput(
+                                            divider_spacing_size=ComponentDividerSpacingSize.M
+                                        )
+                                    ),
+                                    # Organization ID
+                                    ComponentContainerContentInput(
+                                        component_row=ComponentRowInput(
+                                            row_main_content=[
+                                                ComponentRowContentInput(
+                                                    component_text=ComponentTextInput(
+                                                        text="Organization ID",
+                                                        text_size=ComponentTextSize.S,
+                                                        text_color=ComponentTextColor.MUTED,
+                                                    )
+                                                ),
+                                                ComponentRowContentInput(
+                                                    component_text=ComponentTextInput(
+                                                        text=str(organization.id)
+                                                    )
+                                                ),
+                                            ],
+                                            row_aside_content=[
+                                                ComponentRowContentInput(
+                                                    component_copy_button=ComponentCopyButtonInput(
+                                                        copy_button_value=str(
+                                                            organization.id
+                                                        ),
+                                                        copy_button_tooltip_label="Copy Organization ID",
+                                                    )
+                                                )
+                                            ],
+                                        )
+                                    ),
+                                    # Backoffice Link
+                                    ComponentContainerContentInput(
+                                        component_link_button=ComponentLinkButtonInput(
+                                            link_button_url=settings.generate_backoffice_url(
+                                                f"/organizations-v2/{organization.id}"
+                                            ),
+                                            link_button_label="View in Backoffice",
+                                        )
+                                    ),
+                                ]
+                            )
+                        ),
+                    ],
+                )
+            )
+
+            if thread_result.error is not None:
+                raise AccountReviewThreadCreationError(
+                    user.id, thread_result.error.message
+                )
+
+    async def create_organization_deletion_thread(
+        self,
+        session: AsyncSession,
+        organization: Organization,
+        requesting_user: User,
+        blocked_reasons: list[str],
+    ) -> None:
+        """Create Plain ticket for organization deletion request."""
+        if not self.enabled:
+            return
+
+        async with self._get_plain_client() as plain:
+            customer_result = await plain.upsert_customer(
+                UpsertCustomerInput(
+                    identifier=UpsertCustomerIdentifierInput(
+                        email_address=requesting_user.email
+                    ),
+                    on_create=UpsertCustomerOnCreateInput(
+                        external_id=str(requesting_user.id),
+                        full_name=requesting_user.email,
+                        email=EmailAddressInput(
+                            email=requesting_user.email,
+                            is_verified=requesting_user.email_verified,
+                        ),
+                    ),
+                    on_update=UpsertCustomerOnUpdateInput(
+                        email=EmailAddressInput(
+                            email=requesting_user.email,
+                            is_verified=requesting_user.email_verified,
+                        ),
+                    ),
+                )
+            )
+            if customer_result.error is not None:
+                raise AccountReviewThreadCreationError(
+                    organization.id, customer_result.error.message
+                )
+
+            reasons_text = ", ".join(blocked_reasons) if blocked_reasons else "unknown"
+
+            thread_result = await plain.create_thread(
+                CreateThreadInput(
+                    customer_identifier=self._get_customer_identifier(
+                        customer_result, requesting_user.email
+                    ),
+                    title=f"Organization Deletion Request - {organization.slug}",
+                    label_type_ids=["lt_01JKD9ASBPVX09YYXGHSXZRWSA"],
+                    components=[
+                        ComponentInput(
+                            component_text=ComponentTextInput(
+                                text=f"User has requested deletion of organization `{organization.slug}`."
+                            )
+                        ),
+                        ComponentInput(
+                            component_text=ComponentTextInput(
+                                text=f"Blocked reasons: {reasons_text}",
+                                text_color=ComponentTextColor.MUTED,
+                            )
+                        ),
+                        ComponentInput(
+                            component_spacer=ComponentSpacerInput(
+                                spacer_size=ComponentSpacerSize.M
+                            )
+                        ),
+                        ComponentInput(
+                            component_container=ComponentContainerInput(
+                                container_content=[
+                                    ComponentContainerContentInput(
+                                        component_text=ComponentTextInput(
+                                            text=organization.name or organization.slug
+                                        )
+                                    ),
+                                    ComponentContainerContentInput(
+                                        component_divider=ComponentDividerInput(
+                                            divider_spacing_size=ComponentDividerSpacingSize.M
+                                        )
+                                    ),
+                                    ComponentContainerContentInput(
+                                        component_row=ComponentRowInput(
+                                            row_main_content=[
+                                                ComponentRowContentInput(
+                                                    component_text=ComponentTextInput(
+                                                        text="Organization ID",
+                                                        text_size=ComponentTextSize.S,
+                                                        text_color=ComponentTextColor.MUTED,
+                                                    )
+                                                ),
+                                                ComponentRowContentInput(
+                                                    component_text=ComponentTextInput(
+                                                        text=str(organization.id)
+                                                    )
+                                                ),
+                                            ],
+                                            row_aside_content=[
+                                                ComponentRowContentInput(
+                                                    component_copy_button=ComponentCopyButtonInput(
+                                                        copy_button_value=str(
+                                                            organization.id
+                                                        ),
+                                                        copy_button_tooltip_label="Copy Organization ID",
+                                                    )
+                                                )
+                                            ],
+                                        )
+                                    ),
+                                    ComponentContainerContentInput(
+                                        component_link_button=ComponentLinkButtonInput(
+                                            link_button_url=settings.generate_backoffice_url(
+                                                f"/organizations-v2/{organization.id}"
+                                            ),
+                                            link_button_label="View in Backoffice",
+                                        )
+                                    ),
+                                ]
+                            )
+                        ),
+                    ],
+                )
+            )
+            if thread_result.error is not None:
+                raise AccountReviewThreadCreationError(
+                    organization.id, thread_result.error.message
                 )
 
     async def _get_user_card(
@@ -222,8 +490,8 @@ class PlainService:
                                     ComponentRowContentInput(
                                         component_link_button=ComponentLinkButtonInput(
                                             link_button_label="Backoffice ↗",
-                                            link_button_url=settings.generate_external_url(
-                                                f"/backoffice/users/{user.id}"
+                                            link_button_url=settings.generate_backoffice_url(
+                                                f"/users/{user.id}"
                                             ),
                                         )
                                     )
@@ -333,13 +601,7 @@ class PlainService:
                 isouter=True,
             )
             .join(User, User.id == UserOrganization.user_id)
-            .join(Customer, Customer.organization_id == Organization.id, isouter=True)
-            .where(
-                or_(
-                    func.lower(Customer.email) == email.lower(),
-                    func.lower(User.email) == email.lower(),
-                )
-            )
+            .where(func.lower(User.email) == email.lower())
         )
         result = await session.execute(statement)
         organizations = result.unique().scalars().all()
@@ -398,8 +660,8 @@ class PlainService:
                             ComponentRowContentInput(
                                 component_link_button=ComponentLinkButtonInput(
                                     link_button_label="Backoffice ↗",
-                                    link_button_url=settings.generate_external_url(
-                                        f"/backoffice/organizations/{organization.id}"
+                                    link_button_url=settings.generate_backoffice_url(
+                                        f"/organizations-v2/{organization.id}"
                                     ),
                                 )
                             )
@@ -432,6 +694,36 @@ class PlainService:
                                 component_copy_button=ComponentCopyButtonInput(
                                     copy_button_value=str(organization.id),
                                     copy_button_tooltip_label="Copy Organization ID",
+                                )
+                            )
+                        ],
+                    )
+                ),
+                ComponentContainerContentInput(
+                    component_row=ComponentRowInput(
+                        row_main_content=[
+                            ComponentRowContentInput(
+                                component_text=ComponentTextInput(
+                                    text="Customer Portal",
+                                    text_size=ComponentTextSize.S,
+                                    text_color=ComponentTextColor.MUTED,
+                                )
+                            ),
+                            ComponentRowContentInput(
+                                component_text=ComponentTextInput(
+                                    text=settings.generate_frontend_url(
+                                        f"/{organization.slug}/portal"
+                                    )
+                                )
+                            ),
+                        ],
+                        row_aside_content=[
+                            ComponentRowContentInput(
+                                component_copy_button=ComponentCopyButtonInput(
+                                    copy_button_value=settings.generate_frontend_url(
+                                        f"/{organization.slug}/portal"
+                                    ),
+                                    copy_button_tooltip_label="Copy URL",
                                 )
                             )
                         ],
@@ -502,121 +794,158 @@ class PlainService:
         if len(customers) == 0:
             return None
 
-        def _get_customer_container(customer: Customer) -> dict[str, Any]:
+        def _get_customer_container(customer: Customer) -> ComponentContainerInput:
             country: pycountry.db.Country | None = None
             if customer.billing_address and customer.billing_address.country:
                 country = pycountry.countries.get(
                     alpha_2=customer.billing_address.country
                 )
-            return {
-                "componentContainer": {
-                    "containerContent": [
-                        {"componentText": {"text": customer.name or customer.email}},
-                        {"componentDivider": {"dividerSpacingSize": "M"}},
-                        {
-                            "componentRow": {
-                                "rowMainContent": [
-                                    {
-                                        "componentText": {
-                                            "text": "ID",
-                                            "textSize": "S",
-                                            "textColor": "MUTED",
-                                        }
-                                    },
-                                    {"componentText": {"text": customer.id}},
-                                ],
-                                "rowAsideContent": [
-                                    {
-                                        "componentCopyButton": {
-                                            "copyButtonValue": customer.id,
-                                            "copyButtonTooltipLabel": "Copy Customer ID",
-                                        }
-                                    }
-                                ],
-                            }
-                        },
-                        {"componentSpacer": {"spacerSize": "M"}},
-                        {
-                            "componentText": {
-                                "text": "Created At",
-                                "textSize": "S",
-                                "textColor": "MUTED",
-                            }
-                        },
-                        {
-                            "componentText": {
-                                "text": customer.created_at.date().isoformat()
-                            }
-                        },
-                        *(
-                            [
-                                {"componentSpacer": {"spacerSize": "M"}},
-                                {
-                                    "componentRow": {
-                                        "rowMainContent": [
-                                            {
-                                                "componentText": {
-                                                    "text": "Country",
-                                                    "textSize": "S",
-                                                    "textColor": "MUTED",
-                                                }
-                                            },
-                                            {
-                                                "componentText": {
-                                                    "text": country.name,
-                                                }
-                                            },
-                                        ],
-                                        "rowAsideContent": [
-                                            {"componentText": {"text": country.flag}}
-                                        ],
-                                    }
-                                },
-                            ]
-                            if country
-                            else []
-                        ),
-                        {"componentSpacer": {"spacerSize": "M"}},
-                        {
-                            "componentRow": {
-                                "rowMainContent": [
-                                    {
-                                        "componentText": {
-                                            "text": "Stripe Customer ID",
-                                            "textSize": "S",
-                                            "textColor": "MUTED",
-                                        }
-                                    },
-                                    {
-                                        "componentText": {
-                                            "text": customer.stripe_customer_id,
-                                        }
-                                    },
-                                ],
-                                "rowAsideContent": [
-                                    {
-                                        "componentLinkButton": {
-                                            "linkButtonLabel": "Stripe ↗",
-                                            "linkButtonUrl": f"https://dashboard.stripe.com/customers/{customer.stripe_customer_id}",
-                                        }
-                                    }
-                                ],
-                            }
-                        },
-                    ]
-                }
-            }
+            return ComponentContainerInput(
+                container_content=[
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(
+                            text=customer.name or customer.email or "Unknown"
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_divider=ComponentDividerInput(
+                            divider_spacing_size=ComponentDividerSpacingSize.M
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_row=ComponentRowInput(
+                            row_main_content=[
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text="ID",
+                                        text_size=ComponentTextSize.S,
+                                        text_color=ComponentTextColor.MUTED,
+                                    )
+                                ),
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text=str(customer.id)
+                                    )
+                                ),
+                            ],
+                            row_aside_content=[
+                                ComponentRowContentInput(
+                                    component_copy_button=ComponentCopyButtonInput(
+                                        copy_button_value=str(customer.id),
+                                        copy_button_tooltip_label="Copy Customer ID",
+                                    )
+                                )
+                            ],
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_spacer=ComponentSpacerInput(
+                            spacer_size=ComponentSpacerSize.M
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(
+                            text="Created At",
+                            text_size=ComponentTextSize.S,
+                            text_color=ComponentTextColor.MUTED,
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(
+                            text=customer.created_at.date().isoformat()
+                        )
+                    ),
+                    *(
+                        [
+                            ComponentContainerContentInput(
+                                component_spacer=ComponentSpacerInput(
+                                    spacer_size=ComponentSpacerSize.M
+                                )
+                            ),
+                            ComponentContainerContentInput(
+                                component_row=ComponentRowInput(
+                                    row_main_content=[
+                                        ComponentRowContentInput(
+                                            component_text=ComponentTextInput(
+                                                text="Country",
+                                                text_size=ComponentTextSize.S,
+                                                text_color=ComponentTextColor.MUTED,
+                                            )
+                                        ),
+                                        ComponentRowContentInput(
+                                            component_text=ComponentTextInput(
+                                                text=country.name,
+                                            )
+                                        ),
+                                    ],
+                                    row_aside_content=[
+                                        ComponentRowContentInput(
+                                            component_text=ComponentTextInput(
+                                                text=country.flag
+                                            )
+                                        )
+                                    ],
+                                )
+                            ),
+                        ]
+                        if country
+                        else []
+                    ),
+                    ComponentContainerContentInput(
+                        component_spacer=ComponentSpacerInput(
+                            spacer_size=ComponentSpacerSize.M
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_row=ComponentRowInput(
+                            row_main_content=[
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text="Stripe Customer ID",
+                                        text_size=ComponentTextSize.S,
+                                        text_color=ComponentTextColor.MUTED,
+                                    )
+                                ),
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text=customer.stripe_customer_id or "N/A",
+                                    )
+                                ),
+                            ],
+                            row_aside_content=[
+                                ComponentRowContentInput(
+                                    component_link_button=ComponentLinkButtonInput(
+                                        link_button_label="Stripe ↗",
+                                        link_button_url=f"https://dashboard.stripe.com/customers/{customer.stripe_customer_id}",
+                                    )
+                                )
+                            ],
+                        )
+                    ),
+                ]
+            )
 
-        components = []
+        components: list[ComponentInput] = []
         for i, customer in enumerate(customers):
-            components.append(_get_customer_container(customer))
+            components.append(
+                ComponentInput(component_container=_get_customer_container(customer))
+            )
             if i < len(customers) - 1:
-                components.append({"componentDivider": {"dividerSpacingSize": "M"}})
+                components.append(
+                    ComponentInput(
+                        component_divider=ComponentDividerInput(
+                            divider_spacing_size=ComponentDividerSpacingSize.M
+                        )
+                    )
+                )
 
         return CustomerCard(
             key=CustomerCardKey.customer,
             timeToLiveSeconds=86400,
-            components=components,
+            components=[
+                component.model_dump(by_alias=True, exclude_none=True)
+                for component in components
+            ],
         )
 
     async def _get_order_card(
@@ -628,14 +957,14 @@ class PlainService:
             (
                 select(Order)
                 .join(Customer, onclause=Customer.id == Order.customer_id)
-                .join(Product, onclause=Product.id == Order.product_id)
+                .join(Product, onclause=Product.id == Order.product_id, isouter=True)
                 .where(func.lower(Customer.email) == email.lower())
             )
             .order_by(Order.created_at.desc())
             .limit(3)
             .options(
                 contains_eager(Order.product),
-                contains_eager(Order.customer),
+                contains_eager(Order.customer).joinedload(Customer.organization),
             )
         )
         result = await session.execute(statement)
@@ -644,141 +973,607 @@ class PlainService:
         if len(orders) == 0:
             return None
 
-        def _get_order_container(order: Order) -> dict[str, Any]:
-            product = order.product
+        def _get_order_container(order: Order) -> ComponentContainerInput:
+            organization = order.customer.organization
 
-            return {
-                "componentContainer": {
-                    "containerContent": [
-                        {"componentText": {"text": product.name}},
-                        {"componentDivider": {"dividerSpacingSize": "M"}},
-                        {
-                            "componentRow": {
-                                "rowMainContent": [
-                                    {
-                                        "componentText": {
-                                            "text": "ID",
-                                            "textSize": "S",
-                                            "textColor": "MUTED",
-                                        }
-                                    },
-                                    {"componentText": {"text": order.id}},
-                                ],
-                                "rowAsideContent": [
-                                    {
-                                        "componentCopyButton": {
-                                            "copyButtonValue": order.id,
-                                            "copyButtonTooltipLabel": "Copy Order ID",
-                                        }
-                                    }
-                                ],
-                            }
-                        },
-                        {"componentSpacer": {"spacerSize": "M"}},
-                        {
-                            "componentText": {
-                                "text": "Date",
-                                "textSize": "S",
-                                "textColor": "MUTED",
-                            }
-                        },
-                        {
-                            "componentText": {
-                                "text": order.created_at.date().isoformat()
-                            }
-                        },
-                        {"componentSpacer": {"spacerSize": "M"}},
-                        {
-                            "componentText": {
-                                "text": "Billing Reason",
-                                "textSize": "S",
-                                "textColor": "MUTED",
-                            }
-                        },
-                        {"componentText": {"text": order.billing_reason}},
-                        {"componentDivider": {"dividerSpacingSize": "M"}},
-                        {"componentSpacer": {"spacerSize": "M"}},
-                        {
-                            "componentText": {
-                                "text": "Amount",
-                                "textSize": "S",
-                                "textColor": "MUTED",
-                            }
-                        },
-                        {
-                            "componentText": {
-                                "text": format_currency(
-                                    order.net_amount / 100,
-                                    order.currency.upper(),
-                                    locale="en_US",
+            return ComponentContainerInput(
+                container_content=[
+                    ComponentContainerContentInput(
+                        component_row=ComponentRowInput(
+                            row_main_content=[
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text=order.description
+                                    )
+                                ),
+                            ],
+                            row_aside_content=[
+                                ComponentRowContentInput(
+                                    component_link_button=ComponentLinkButtonInput(
+                                        link_button_label="Backoffice ↗",
+                                        link_button_url=settings.generate_backoffice_url(
+                                            f"/orders/{order.id}"
+                                        ),
+                                    )
                                 )
-                            }
-                        },
-                        {
-                            "componentText": {
-                                "text": "Tax Amount",
-                                "textSize": "S",
-                                "textColor": "MUTED",
-                            }
-                        },
-                        {
-                            "componentText": {
-                                "text": format_currency(
-                                    order.tax_amount / 100,
-                                    order.currency.upper(),
-                                    locale="en_US",
+                            ],
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_divider=ComponentDividerInput(
+                            divider_spacing_size=ComponentDividerSpacingSize.M
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_row=ComponentRowInput(
+                            row_main_content=[
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text="Organization",
+                                        text_size=ComponentTextSize.S,
+                                        text_color=ComponentTextColor.MUTED,
+                                    )
+                                ),
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text=organization.name
+                                    )
+                                ),
+                            ],
+                            row_aside_content=[
+                                ComponentRowContentInput(
+                                    component_link_button=ComponentLinkButtonInput(
+                                        link_button_label="Backoffice ↗",
+                                        link_button_url=settings.generate_backoffice_url(
+                                            f"/organizations-v2/{organization.id}"
+                                        ),
+                                    )
                                 )
-                            }
-                        },
-                        {
-                            "componentRow": {
-                                "rowMainContent": [
-                                    {
-                                        "componentText": {
-                                            "text": "Stripe Invoice ID",
-                                            "textSize": "S",
-                                            "textColor": "MUTED",
-                                        }
-                                    },
-                                    {
-                                        "componentText": {
-                                            "text": order.stripe_invoice_id,
-                                        }
-                                    },
-                                ],
-                                "rowAsideContent": [
-                                    {
-                                        "componentLinkButton": {
-                                            "linkButtonLabel": "Stripe ↗",
-                                            "linkButtonUrl": f"https://dashboard.stripe.com/invoices/{order.stripe_invoice_id}",
-                                        }
-                                    }
-                                ],
-                            }
-                        },
-                    ]
-                }
-            }
+                            ],
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_spacer=ComponentSpacerInput(
+                            spacer_size=ComponentSpacerSize.M
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_row=ComponentRowInput(
+                            row_main_content=[
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text="Customer Portal",
+                                        text_size=ComponentTextSize.S,
+                                        text_color=ComponentTextColor.MUTED,
+                                    )
+                                ),
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text=settings.generate_frontend_url(
+                                            f"/{organization.slug}/portal"
+                                        )
+                                    )
+                                ),
+                            ],
+                            row_aside_content=[
+                                ComponentRowContentInput(
+                                    component_copy_button=ComponentCopyButtonInput(
+                                        copy_button_value=settings.generate_frontend_url(
+                                            f"/{organization.slug}/portal"
+                                        ),
+                                        copy_button_tooltip_label="Copy URL",
+                                    )
+                                )
+                            ],
+                        )
+                    ),
+                    *(
+                        [
+                            ComponentContainerContentInput(
+                                component_row=ComponentRowInput(
+                                    row_main_content=[
+                                        ComponentRowContentInput(
+                                            component_text=ComponentTextInput(
+                                                text="Support Email",
+                                                text_size=ComponentTextSize.S,
+                                                text_color=ComponentTextColor.MUTED,
+                                            )
+                                        ),
+                                        ComponentRowContentInput(
+                                            component_text=ComponentTextInput(
+                                                text=organization.email
+                                            )
+                                        ),
+                                    ],
+                                    row_aside_content=[
+                                        ComponentRowContentInput(
+                                            component_copy_button=ComponentCopyButtonInput(
+                                                copy_button_value=organization.email,
+                                                copy_button_tooltip_label="Copy Support Email",
+                                            )
+                                        )
+                                    ],
+                                )
+                            ),
+                        ]
+                        if organization.email
+                        else []
+                    ),
+                    ComponentContainerContentInput(
+                        component_spacer=ComponentSpacerInput(
+                            spacer_size=ComponentSpacerSize.M
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_row=ComponentRowInput(
+                            row_main_content=[
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text="ID",
+                                        text_size=ComponentTextSize.S,
+                                        text_color=ComponentTextColor.MUTED,
+                                    )
+                                ),
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text=str(order.id)
+                                    )
+                                ),
+                            ],
+                            row_aside_content=[
+                                ComponentRowContentInput(
+                                    component_copy_button=ComponentCopyButtonInput(
+                                        copy_button_value=str(order.id),
+                                        copy_button_tooltip_label="Copy Order ID",
+                                    )
+                                )
+                            ],
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_spacer=ComponentSpacerInput(
+                            spacer_size=ComponentSpacerSize.M
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(
+                            text="Date",
+                            text_size=ComponentTextSize.S,
+                            text_color=ComponentTextColor.MUTED,
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(
+                            text=order.created_at.date().isoformat()
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_spacer=ComponentSpacerInput(
+                            spacer_size=ComponentSpacerSize.M
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(
+                            text="Billing Reason",
+                            text_size=ComponentTextSize.S,
+                            text_color=ComponentTextColor.MUTED,
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(text=order.billing_reason)
+                    ),
+                    ComponentContainerContentInput(
+                        component_divider=ComponentDividerInput(
+                            divider_spacing_size=ComponentDividerSpacingSize.M
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_spacer=ComponentSpacerInput(
+                            spacer_size=ComponentSpacerSize.M
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(
+                            text="Amount",
+                            text_size=ComponentTextSize.S,
+                            text_color=ComponentTextColor.MUTED,
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(
+                            text=format_currency(
+                                order.net_amount / 100,
+                                order.currency.upper(),
+                                locale="en_US",
+                            )
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(
+                            text="Tax Amount",
+                            text_size=ComponentTextSize.S,
+                            text_color=ComponentTextColor.MUTED,
+                        )
+                    ),
+                    ComponentContainerContentInput(
+                        component_text=ComponentTextInput(
+                            text=format_currency(
+                                order.tax_amount / 100,
+                                order.currency.upper(),
+                                locale="en_US",
+                            )
+                        )
+                    ),
+                ]
+            )
 
-        components = []
+        components: list[ComponentInput] = []
         for i, order in enumerate(orders):
-            components.append(_get_order_container(order))
+            components.append(
+                ComponentInput(component_container=_get_order_container(order))
+            )
             if i < len(orders) - 1:
-                components.append({"componentDivider": {"dividerSpacingSize": "M"}})
+                components.append(
+                    ComponentInput(
+                        component_divider=ComponentDividerInput(
+                            divider_spacing_size=ComponentDividerSpacingSize.M
+                        )
+                    )
+                )
 
         return CustomerCard(
             key=CustomerCardKey.order,
             timeToLiveSeconds=86400,
-            components=components,
+            components=[
+                component.model_dump(by_alias=True, exclude_none=True)
+                for component in components
+            ],
         )
+
+    async def _get_snippets_card(
+        self, session: AsyncSession, request: CustomerCardsRequest
+    ) -> CustomerCard | None:
+        email = request.customer.email
+
+        statement = (
+            select(Organization)
+            .join(Customer, Customer.organization_id == Organization.id)
+            .where(func.lower(Customer.email) == email.lower())
+        )
+        result = await session.execute(statement)
+        organizations = result.unique().scalars().all()
+
+        if len(organizations) == 0:
+            return None
+
+        snippets: list[tuple[str, str]] = [
+            (
+                "Looping In",
+                (
+                    "I'm looping in the {organization_name} team to the conversation so that they can help you."
+                ),
+            ),
+            (
+                "Looping In with guidelines",
+                (
+                    "I'm looping in the {organization_name} team to the conversation so that they can help you. "
+                    "Please allow them up to 48 hours to get back to you ([guidelines for merchants on Polar](https://polar.sh/docs/merchant-of-record/account-reviews#operational-guidelines))."
+                ),
+            ),
+            (
+                "Cancellation Portal",
+                (
+                    "You can perform the cancellation on the following URL: https://polar.sh/{organization_slug}/portal\n"
+                ),
+            ),
+            (
+                "Invoice Generation",
+                (
+                    "You can generate the invoice on the following URL: https://polar.sh/{organization_slug}/portal\n"
+                ),
+            ),
+            (
+                "Follow-up 48 hours",
+                (
+                    "I'm looping in the {organization_name} team again to the conversation. "
+                    "Please allow them another 48 hours to get back to you before we [proceed with the documented resolution](https://polar.sh/docs/merchant-of-record/account-reviews#expected-responsiveness)."
+                ),
+            ),
+            (
+                "Follow-up Reply All",
+                (
+                    "I'm looping in the {organization_name} team again to the conversation. "
+                    'Please use "Reply All" so as to keep everyone involved in the conversation.'
+                ),
+            ),
+            (
+                "Subscription Cancellation",
+                ("I have cancelled the subscription immediately."),
+            ),
+        ]
+
+        def _get_snippet_container(
+            organization: Organization,
+        ) -> ComponentContainerInput:
+            snippets_rows: list[ComponentContainerContentInput] = [
+                ComponentContainerContentInput(
+                    component_text=ComponentTextInput(
+                        text=f"Snippets for {organization.name}",
+                    )
+                ),
+                ComponentContainerContentInput(
+                    component_divider=ComponentDividerInput(
+                        divider_spacing_size=ComponentDividerSpacingSize.M
+                    )
+                ),
+            ]
+            for i, (snippet_name, snippet_text) in enumerate(snippets):
+                text = snippet_text.format(
+                    organization_name=organization.name,
+                    organization_slug=organization.slug,
+                )
+                snippets_rows.append(
+                    ComponentContainerContentInput(
+                        component_row=ComponentRowInput(
+                            row_main_content=[
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(
+                                        text_size=ComponentTextSize.S,
+                                        text_color=ComponentTextColor.MUTED,
+                                        text=snippet_name,
+                                    ),
+                                ),
+                                ComponentRowContentInput(
+                                    component_text=ComponentTextInput(text=text)
+                                ),
+                            ],
+                            row_aside_content=[
+                                ComponentRowContentInput(
+                                    component_copy_button=ComponentCopyButtonInput(
+                                        copy_button_value=text,
+                                        copy_button_tooltip_label="Copy Snippet",
+                                    )
+                                )
+                            ],
+                        )
+                    )
+                )
+                if i < len(snippets) - 1:
+                    snippets_rows.append(
+                        ComponentContainerContentInput(
+                            component_spacer=ComponentSpacerInput(
+                                spacer_size=ComponentSpacerSize.M
+                            )
+                        )
+                    )
+
+            return ComponentContainerInput(container_content=snippets_rows)
+
+        components: list[ComponentInput] = []
+        for i, organization in enumerate(organizations):
+            components.append(
+                ComponentInput(component_container=_get_snippet_container(organization))
+            )
+            if i < len(organizations) - 1:
+                components.append(
+                    ComponentInput(
+                        component_divider=ComponentDividerInput(
+                            divider_spacing_size=ComponentDividerSpacingSize.M
+                        )
+                    )
+                )
+
+        return CustomerCard(
+            key=CustomerCardKey.snippets,
+            timeToLiveSeconds=86400,
+            components=[
+                component.model_dump(by_alias=True, exclude_none=True)
+                for component in components
+            ],
+        )
+
+    def _get_customer_identifier(
+        self,
+        customer_result: UpsertCustomerUpsertCustomer,
+        email: str,
+    ) -> CustomerIdentifierInput:
+        """
+        Get customer identifier for Plain thread creation.
+
+        Prefers external_id if set on the customer result, otherwise falls back to email.
+        This handles cases where external_id might not be set on the Plain customer.
+        """
+        if customer_result.customer is None:
+            raise ValueError(
+                "Customer not found when creating thread", customer_result, email
+            )
+
+        if customer_result.customer.external_id:
+            return CustomerIdentifierInput(
+                external_id=customer_result.customer.external_id
+            )
+
+        return CustomerIdentifierInput(email_address=email)
+
+    async def check_thread_exists(self, customer_email: str, thread_title: str) -> bool:
+        """
+        Check if a thread with the given title exists for a customer.
+        Only considers threads that are not done/closed.
+        """
+        if not self.enabled:
+            log.warning("Plain integration is disabled, assuming no thread exists")
+            return False
+
+        log.info("Checking thread existence", customer_email=customer_email)
+
+        async with self._get_plain_client() as plain:
+            user = await plain.customer_by_email(email=customer_email)
+            log.info("User found", user_id=user)
+            if not user:
+                log.warning("User not found", email=customer_email)
+                return False
+            filters = ThreadsFilter(customer_ids=[user.id])
+            threads = await plain.threads(filters=filters)
+            nr_threads = 0
+            for edge in threads.edges:
+                thread = edge.node
+                if thread.title == thread_title:
+                    nr_threads += 1
+            log.info(f"There are {nr_threads} threads for user {customer_email}")
+            return nr_threads > 0
 
     @contextlib.asynccontextmanager
     async def _get_plain_client(self) -> AsyncIterator[Plain]:
-        async with Plain(
-            "https://core-api.uk.plain.com/graphql/v1",
-            {"Authorization": f"Bearer {settings.PLAIN_TOKEN}"},
-        ) as plain:
-            yield plain
+        async with httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {settings.PLAIN_TOKEN}"},
+            # Set a MockTransport if not enabled
+            # Basically, we disable Plain requests.
+            transport=(
+                httpx.MockTransport(lambda _: httpx.Response(200))
+                if not self.enabled
+                else None
+            ),
+        ) as client:
+            async with Plain(
+                "https://core-api.uk.plain.com/graphql/v1", http_client=client
+            ) as plain:
+                yield plain
+
+    async def create_manual_organization_thread(
+        self,
+        session: AsyncSession,
+        organization: Organization,
+        admin: User,
+        title: str,
+    ) -> str:
+        """Create a manual thread for an organization with the admin user."""
+        if not self.enabled:
+            return ""
+
+        async with self._get_plain_client() as plain:
+            customer_result = await plain.upsert_customer(
+                UpsertCustomerInput(
+                    identifier=UpsertCustomerIdentifierInput(email_address=admin.email),
+                    on_create=UpsertCustomerOnCreateInput(
+                        external_id=str(admin.id),
+                        full_name=admin.email,
+                        email=EmailAddressInput(
+                            email=admin.email, is_verified=admin.email_verified
+                        ),
+                    ),
+                    on_update=UpsertCustomerOnUpdateInput(
+                        email=EmailAddressInput(
+                            email=admin.email, is_verified=admin.email_verified
+                        ),
+                    ),
+                )
+            )
+            if customer_result.error is not None:
+                raise AccountReviewThreadCreationError(
+                    organization.id, customer_result.error.message
+                )
+
+            thread_result = await plain.create_thread(
+                CreateThreadInput(
+                    customer_identifier=self._get_customer_identifier(
+                        customer_result, admin.email
+                    ),
+                    title=title,
+                    components=[
+                        ComponentInput(
+                            component_container=ComponentContainerInput(
+                                container_content=[
+                                    ComponentContainerContentInput(
+                                        component_text=ComponentTextInput(
+                                            text=organization.name or organization.slug
+                                        )
+                                    ),
+                                    ComponentContainerContentInput(
+                                        component_divider=ComponentDividerInput(
+                                            divider_spacing_size=ComponentDividerSpacingSize.M
+                                        )
+                                    ),
+                                    # Organization ID
+                                    ComponentContainerContentInput(
+                                        component_row=ComponentRowInput(
+                                            row_main_content=[
+                                                ComponentRowContentInput(
+                                                    component_text=ComponentTextInput(
+                                                        text="Organization ID",
+                                                        text_size=ComponentTextSize.S,
+                                                        text_color=ComponentTextColor.MUTED,
+                                                    )
+                                                ),
+                                                ComponentRowContentInput(
+                                                    component_text=ComponentTextInput(
+                                                        text=str(organization.id)
+                                                    )
+                                                ),
+                                            ],
+                                            row_aside_content=[
+                                                ComponentRowContentInput(
+                                                    component_copy_button=ComponentCopyButtonInput(
+                                                        copy_button_value=str(
+                                                            organization.id
+                                                        ),
+                                                        copy_button_tooltip_label="Copy Organization ID",
+                                                    )
+                                                )
+                                            ],
+                                        )
+                                    ),
+                                    # Next Review Threshold
+                                    ComponentContainerContentInput(
+                                        component_row=ComponentRowInput(
+                                            row_main_content=[
+                                                ComponentRowContentInput(
+                                                    component_text=ComponentTextInput(
+                                                        text="Next Review Threshold",
+                                                        text_size=ComponentTextSize.S,
+                                                        text_color=ComponentTextColor.MUTED,
+                                                    )
+                                                ),
+                                                ComponentRowContentInput(
+                                                    component_text=ComponentTextInput(
+                                                        text=format_currency(
+                                                            organization.next_review_threshold
+                                                            / 100,
+                                                            "USD",
+                                                            locale="en_US",
+                                                        )
+                                                    )
+                                                ),
+                                            ],
+                                            row_aside_content=[],
+                                        )
+                                    ),
+                                    # Backoffice Link
+                                    ComponentContainerContentInput(
+                                        component_link_button=ComponentLinkButtonInput(
+                                            link_button_url=settings.generate_backoffice_url(
+                                                f"/organizations-v2/{organization.id}"
+                                            ),
+                                            link_button_label="View in Backoffice",
+                                        )
+                                    ),
+                                ]
+                            )
+                        ),
+                    ],
+                )
+            )
+
+            if thread_result.error is not None:
+                raise AccountReviewThreadCreationError(
+                    organization.id, thread_result.error.message
+                )
+
+            if thread_result.thread is None:
+                raise AccountReviewThreadCreationError(
+                    organization.id, "Failed to create thread: no thread returned"
+                )
+
+            return thread_result.thread.id
 
 
 plain = PlainService()

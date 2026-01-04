@@ -3,12 +3,12 @@ title: "Products"
 description: "Create digital products on Polar in minutes"
 ---
 
-<Note>
+<Info>
 **Everything is a product**
 
 Subscriptions or pay once products are both considered a product in Polar (API & data model). Just with different pricing & billing logic. So both are shown & managed under Products with the ability to filter based on pricing model.
 
-</Note>
+</Info>
 
 <img
   className="block dark:hidden"
@@ -51,16 +51,22 @@ Determine how you want to charge your customers for this product.
   </Step>
 </Steps>
 
-<Warning>
+<Info>
   Billing cycle and pricing type cannot be changed after the product is created.
-</Warning>
+</Info>
 
-<Note>
+<Info>
   **What if I want both a monthly and yearly pricing?**
 
 Polar has a unique approach to what the industry typically calls **variants**. Each product has a single pricing model, but you can create multiple products with different pricing models, and showcase them both at checkout.
 
-</Note>
+</Info>
+
+### Trial Period
+
+For recurring products, you can set a trial period during which the customer won't be charged. Toggle **Enable trial period** to enable it. Then, you'll be able to set the duration of the trial period, given a number and a unit (days, weeks, months or years).
+
+You can read more about how trials work [here](/features/trials).
 
 ### Product Media
 
@@ -89,10 +95,10 @@ Fields are managed from your organization settings, and you can choose which fie
 - Checkbox
 - Select
 
-<Tip>
+<Info>
   If you make a checkbox **required**, the customer will need to check it before
   confirming their purchase. Very handy for legal terms!
-</Tip>
+</Info>
 
 The data collected will be available in the order and subscription details.
 
@@ -131,7 +137,3 @@ Products on Polar can't be deleted, but they can be **archived**. You can do so 
 Existing customers will keep their access to the product, and subscriptions will continue to renew. However, the product will no longer be available for new purchases.
 
 It's possible to unarchive a product using the [Products Update API](/api-reference/products/update#body-is-archived).
-
-## Subscription Trials
-
-Polar does not have a built-in trial period. However, you can achieve similar functionality by associating a discount with the subscription product.

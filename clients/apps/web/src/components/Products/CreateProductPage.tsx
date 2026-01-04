@@ -1,9 +1,11 @@
+import { Upload } from '@/components/FileUpload/Upload'
 import {
   useBenefits,
   useCreateProduct,
   useUpdateProductBenefits,
 } from '@/hooks/queries'
-import { setValidationErrors } from '@/utils/api/errors'
+import { setProductValidationErrors } from '@/utils/api/errors'
+import { ProductEditOrCreateForm, productToCreateForm } from '@/utils/product'
 import { schemas } from '@polar-sh/client'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import { Form } from '@polar-sh/ui/components/ui/form'
@@ -12,35 +14,68 @@ import { useCallback, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { DashboardBody } from '../Layout/DashboardLayout'
 import { getStatusRedirect } from '../Toast/utils'
-import ProductBenefitsForm from './ProductBenefitsForm'
-import ProductForm, { ProductFullMediasMixin } from './ProductForm/ProductForm'
+import { Benefits } from './Benefits/Benefits'
+import ProductForm from './ProductForm/ProductForm'
 
-type ProductCreateForm = Omit<schemas['ProductCreate'], 'metadata'> &
-  ProductFullMediasMixin & {
-    metadata: { key: string; value: string | number | boolean }[]
-  }
+const reuploadMedia = async (
+  media: schemas['ProductMediaFileRead'],
+  organization: schemas['Organization'],
+): Promise<schemas['ProductMediaFileRead']> => {
+  const response = await fetch(media.public_url)
+  const blob = await response.blob()
+  const file = new File([blob], media.name, { type: media.mime_type })
+
+  return new Promise((resolve, reject) => {
+    const upload = new Upload({
+      organization,
+      service: 'product_media',
+      file,
+      onFileProcessing: () => {},
+      onFileCreate: () => {},
+      onFileUploadProgress: () => {},
+      onFileUploaded: (response) =>
+        resolve(response as schemas['ProductMediaFileRead']),
+    })
+    upload.run().catch(reject)
+  })
+}
 
 export interface CreateProductPageProps {
   organization: schemas['Organization']
-  productPriceType?: schemas['ProductPriceType']
+  sourceProduct?: schemas['Product']
 }
 
-export const CreateProductPage = ({ organization }: CreateProductPageProps) => {
+export const CreateProductPage = ({
+  organization,
+  sourceProduct,
+}: CreateProductPageProps) => {
   const router = useRouter()
-  const benefits = useBenefits(organization.id, {
+  const benefitsQuery = useBenefits(organization.id, {
     limit: 200,
   })
   const organizationBenefits = useMemo(
-    () => benefits.data?.items ?? [],
-    [benefits],
+    () => benefitsQuery.data?.items ?? [],
+    [benefitsQuery],
+  )
+  const totalBenefitCount = benefitsQuery.data?.pagination?.total_count ?? 0
+
+  // Store full benefit objects instead of just IDs to avoid lookup issues
+  const [enabledBenefits, setEnabledBenefits] = useState<schemas['Benefit'][]>(
+    sourceProduct?.benefits ?? [],
   )
 
-  const [enabledBenefitIds, setEnabledBenefitIds] = useState<
-    schemas['Benefit']['id'][]
-  >([])
+  // Derive IDs from the benefit objects
+  const enabledBenefitIds = useMemo(
+    () => enabledBenefits.map((b) => b.id),
+    [enabledBenefits],
+  )
 
-  const form = useForm<ProductCreateForm>({
-    defaultValues: {
+  const getDefaultValues = () => {
+    if (sourceProduct) {
+      return productToCreateForm(sourceProduct)
+    }
+
+    return {
       recurring_interval: null,
       ...{
         prices: [
@@ -56,7 +91,11 @@ export const CreateProductPage = ({ organization }: CreateProductPageProps) => {
       },
       organization_id: organization.id,
       metadata: [],
-    },
+    }
+  }
+
+  const form = useForm<ProductEditOrCreateForm>({
+    defaultValues: getDefaultValues(),
   })
   const { handleSubmit, setError } = form
 
@@ -64,20 +103,30 @@ export const CreateProductPage = ({ organization }: CreateProductPageProps) => {
   const updateBenefits = useUpdateProductBenefits(organization)
 
   const onSubmit = useCallback(
-    async (productCreate: ProductCreateForm) => {
+    async (productCreate: ProductEditOrCreateForm) => {
       const { full_medias, metadata, ...productCreateRest } = productCreate
+
+      // When duplicating, re-upload medias to create new files
+      let mediaIds = full_medias.map((media) => media.id)
+      if (sourceProduct && full_medias.length > 0) {
+        const reuploadedMedias = await Promise.all(
+          full_medias.map((media) => reuploadMedia(media, organization)),
+        )
+        mediaIds = reuploadedMedias.map((media) => media.id)
+      }
 
       const { data: product, error } = await createProduct.mutateAsync({
         ...productCreateRest,
-        medias: full_medias.map((media) => media.id),
+        medias: mediaIds,
         metadata: metadata.reduce(
           (acc, { key, value }) => ({ ...acc, [key]: value }),
           {},
         ),
-      })
+      } as schemas['ProductCreate'])
+
       if (error) {
         if (error.detail) {
-          setValidationErrors(error.detail, setError)
+          setProductValidationErrors(error.detail, setError)
         }
         return
       }
@@ -99,6 +148,7 @@ export const CreateProductPage = ({ organization }: CreateProductPageProps) => {
     },
     [
       organization,
+      sourceProduct,
       enabledBenefitIds,
       createProduct,
       updateBenefits,
@@ -107,37 +157,27 @@ export const CreateProductPage = ({ organization }: CreateProductPageProps) => {
     ],
   )
 
-  const onSelectBenefit = useCallback(
-    (benefit: schemas['Benefit']) => {
-      setEnabledBenefitIds((benefitIds) => [...benefitIds, benefit.id])
-    },
-    [setEnabledBenefitIds],
-  )
+  const onSelectBenefit = useCallback((benefit: schemas['Benefit']) => {
+    setEnabledBenefits((benefits) => [...benefits, benefit])
+  }, [])
 
-  const onRemoveBenefit = useCallback(
-    (benefit: schemas['Benefit']) => {
-      setEnabledBenefitIds((benefitIds) =>
-        benefitIds.filter((b) => b !== benefit.id),
-      )
-    },
-    [setEnabledBenefitIds],
-  )
+  const onRemoveBenefit = useCallback((benefit: schemas['Benefit']) => {
+    setEnabledBenefits((benefits) =>
+      benefits.filter((b) => b.id !== benefit.id),
+    )
+  }, [])
 
-  const enabledBenefits = useMemo(
-    () =>
-      organizationBenefits.filter((benefit) =>
-        enabledBenefitIds.includes(benefit.id),
-      ),
-    [organizationBenefits, enabledBenefitIds],
-  )
+  const onReorderBenefits = useCallback((benefits: schemas['Benefit'][]) => {
+    setEnabledBenefits(benefits)
+  }, [])
 
   return (
     <DashboardBody
-      title="Create Product"
-      wrapperClassName="!max-w-screen-md"
+      title={sourceProduct ? 'Duplicate Product' : 'Create Product'}
+      wrapperClassName="max-w-(--breakpoint-md)!"
       className="gap-y-16"
     >
-      <div className="rounded-4xl dark:border-polar-700 dark:divide-polar-700 flex flex-col divide-y divide-gray-200 border border-gray-200">
+      <div className="dark:border-polar-700 dark:divide-polar-700 flex flex-col divide-y divide-gray-200 rounded-4xl border border-gray-200">
         <Form {...form}>
           <form
             onSubmit={handleSubmit(onSubmit)}
@@ -146,17 +186,14 @@ export const CreateProductPage = ({ organization }: CreateProductPageProps) => {
             <ProductForm organization={organization} update={false} />
           </form>
         </Form>
-        <ProductBenefitsForm
+        <Benefits
           organization={organization}
-          organizationBenefits={organizationBenefits.filter(
-            (benefit) =>
-              // Hide not selectable benefits unless they are already enabled
-              benefit.selectable ||
-              enabledBenefits.some((b) => b.id === benefit.id),
-          )}
-          benefits={enabledBenefits}
+          benefits={organizationBenefits}
+          totalBenefitCount={totalBenefitCount}
+          selectedBenefits={enabledBenefits}
           onSelectBenefit={onSelectBenefit}
           onRemoveBenefit={onRemoveBenefit}
+          onReorderBenefits={onReorderBenefits}
         />
       </div>
       <div className="flex flex-row items-center gap-2 pb-12">

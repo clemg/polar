@@ -11,7 +11,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-downloads/
+server/downloads/
 eggs/
 .eggs/
 lib64/
@@ -126,6 +126,9 @@ dmypy.json
 # Playground file
 playground.py
 
+# Playwright
+.playwright-mcp/
+
 .DS_Store
 .pnpm-store
 
@@ -136,3 +139,7 @@ playground.py
 *.mmdb
 server/tests/invoice/test_invoice*.pdf
 supervisord.pid
+server/.minio/
+
+# Docker dev environment
+dev/docker/.env.docker

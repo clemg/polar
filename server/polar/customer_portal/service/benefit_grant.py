@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any, cast
 
-from sqlalchemy import Select, UnaryExpression, asc, desc, or_, select
+from sqlalchemy import Select, UnaryExpression, and_, asc, desc, or_, select
 from sqlalchemy.orm import contains_eager, joinedload
 
 from polar.auth.models import AuthSubject
@@ -19,6 +19,8 @@ from polar.models import (
     Customer,
     Order,
     Organization,
+    Product,
+    ProductBenefit,
     Subscription,
 )
 from polar.models.benefit import BenefitType
@@ -35,6 +37,7 @@ class CustomerBenefitGrantSortProperty(StrEnum):
     granted_at = "granted_at"
     type = "type"
     organization = "organization"
+    product_benefit = "product_benefit"
 
 
 class CustomerBenefitGrantService(ResourceServiceReader[BenefitGrant]):
@@ -45,13 +48,14 @@ class CustomerBenefitGrantService(ResourceServiceReader[BenefitGrant]):
         *,
         type: Sequence[BenefitType] | None = None,
         benefit_id: Sequence[uuid.UUID] | None = None,
-        organization_id: Sequence[uuid.UUID] | None = None,
         checkout_id: Sequence[uuid.UUID] | None = None,
         order_id: Sequence[uuid.UUID] | None = None,
         subscription_id: Sequence[uuid.UUID] | None = None,
+        member_id: Sequence[uuid.UUID] | None = None,
         pagination: PaginationParams,
         sorting: list[Sorting[CustomerBenefitGrantSortProperty]] = [
-            (CustomerBenefitGrantSortProperty.granted_at, True)
+            (CustomerBenefitGrantSortProperty.product_benefit, False),
+            (CustomerBenefitGrantSortProperty.granted_at, True),
         ],
     ) -> tuple[Sequence[BenefitGrant], int]:
         statement = self._get_readable_benefit_grant_statement(auth_subject).options(
@@ -64,26 +68,40 @@ class CustomerBenefitGrantService(ResourceServiceReader[BenefitGrant]):
         if benefit_id is not None:
             statement = statement.where(BenefitGrant.benefit_id.in_(benefit_id))
 
-        if organization_id is not None:
-            statement = statement.where(Benefit.organization_id.in_(organization_id))
+        statement = (
+            statement.join(
+                Subscription,
+                onclause=Subscription.id == BenefitGrant.subscription_id,
+                isouter=True,
+            )
+            .join(
+                Order,
+                onclause=Order.id == BenefitGrant.order_id,
+                isouter=True,
+            )
+            .join(
+                Product,
+                onclause=or_(
+                    Product.id == Subscription.product_id,
+                    Product.id == Order.product_id,
+                ),
+                isouter=True,
+            )
+            .join(
+                ProductBenefit,
+                onclause=and_(
+                    ProductBenefit.product_id == Product.id,
+                    ProductBenefit.benefit_id == BenefitGrant.benefit_id,
+                ),
+                isouter=True,
+            )
+        )
 
         if checkout_id is not None:
-            statement = (
-                statement.join(
-                    Subscription,
-                    onclause=Subscription.id == BenefitGrant.subscription_id,
-                    isouter=True,
-                )
-                .join(
-                    Order,
-                    onclause=Order.id == BenefitGrant.order_id,
-                    isouter=True,
-                )
-                .where(
-                    or_(
-                        Subscription.checkout_id.in_(checkout_id),
-                        Order.checkout_id.in_(checkout_id),
-                    )
+            statement = statement.where(
+                or_(
+                    Subscription.checkout_id.in_(checkout_id),
+                    Order.checkout_id.in_(checkout_id),
                 )
             )
 
@@ -95,6 +113,9 @@ class CustomerBenefitGrantService(ResourceServiceReader[BenefitGrant]):
                 BenefitGrant.subscription_id.in_(subscription_id)
             )
 
+        if member_id is not None:
+            statement = statement.where(BenefitGrant.member_id.in_(member_id))
+
         order_by_clauses: list[UnaryExpression[Any]] = []
         for criterion, is_desc in sorting:
             clause_function = desc if is_desc else asc
@@ -104,6 +125,8 @@ class CustomerBenefitGrantService(ResourceServiceReader[BenefitGrant]):
                 order_by_clauses.append(clause_function(Benefit.type))
             elif criterion == CustomerBenefitGrantSortProperty.organization:
                 order_by_clauses.append(clause_function(Organization.slug))
+            elif criterion == CustomerBenefitGrantSortProperty.product_benefit:
+                order_by_clauses.append(clause_function(ProductBenefit.order))
         statement = statement.order_by(*order_by_clauses)
 
         return await paginate(session, statement, pagination=pagination)
@@ -150,24 +173,27 @@ class CustomerBenefitGrantService(ResourceServiceReader[BenefitGrant]):
             benefit_grant_update, CustomerBenefitGrantGitHubRepositoryUpdate
         ):
             account_id = benefit_grant_update.properties["account_id"]
-            platform = benefit_grant_update.get_oauth_platform()
+            if account_id is not None:
+                platform = benefit_grant_update.get_oauth_platform()
 
-            customer_repository = CustomerRepository.from_session(session)
-            customer = await customer_repository.get_by_id(benefit_grant.customer_id)
-            assert customer is not None
-
-            oauth_account = customer.get_oauth_account(account_id, platform)
-            if oauth_account is None:
-                raise PolarRequestValidationError(
-                    [
-                        {
-                            "type": "value_error",
-                            "loc": ("body", "properties", "account_id"),
-                            "msg": "OAuth account does not exist.",
-                            "input": account_id,
-                        }
-                    ]
+                customer_repository = CustomerRepository.from_session(session)
+                customer = await customer_repository.get_by_id(
+                    benefit_grant.customer_id
                 )
+                assert customer is not None
+
+                oauth_account = customer.get_oauth_account(account_id, platform)
+                if oauth_account is None:
+                    raise PolarRequestValidationError(
+                        [
+                            {
+                                "type": "value_error",
+                                "loc": ("body", "properties", "account_id"),
+                                "msg": "OAuth account does not exist.",
+                                "input": account_id,
+                            }
+                        ]
+                    )
 
             benefit_grant.properties = cast(
                 Any,

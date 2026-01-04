@@ -2,5 +2,22 @@ packages:
   - apps/*
   - packages/*
   - examples/*
+
 onlyBuiltDependencies:
+  - '@parcel/watcher'
   - '@sentry/cli'
+  - '@tailwindcss/oxide'
+  - core-js-pure
+  - esbuild
+  - sharp
+  - unrs-resolver
+
+minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  - react
+  - 'react-dom'
+  - next
+  - '@next/bundle-analyzer'
+  - '@next/third-parties'
+  - '@next/mdx'
+  - '@next/env'

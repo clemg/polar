@@ -1,82 +1,50 @@
 'use client'
 
 import { cookieConsentGiven } from '@/components/Privacy/CookieConsent'
-import { queryClient } from '@/utils/api/query'
+import { NavigationHistoryProvider } from '@/providers/navigationHistory'
+import { getQueryClient } from '@/utils/api/query'
 import { CONFIG } from '@/utils/config'
 import { QueryClientProvider } from '@tanstack/react-query'
-import { ReactQueryStreamedHydration } from '@tanstack/react-query-next-experimental'
-import { AppProgressBar as ProgressBar } from 'next-nprogress-bar'
 import { ThemeProvider } from 'next-themes'
 import { usePathname, useSearchParams } from 'next/navigation'
 import { NuqsAdapter } from 'nuqs/adapters/next/app'
-import PostHog from 'posthog-js-lite'
-import {
-  createContext,
-  PropsWithChildren,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react'
+import posthog from 'posthog-js'
+import { PostHogProvider } from 'posthog-js/react'
+import { PropsWithChildren, useEffect } from 'react'
 
-const stub = (): never => {
-  throw new Error(
-    'You forgot to wrap your component in <PolarPostHogProvider>.',
-  )
-}
-
-export const PostHogContext = createContext<{
-  client: PostHog | null
-  setPersistence: (
-    persistence: 'localStorage' | 'sessionStorage' | 'cookie' | 'memory',
-  ) => void
-  // @ts-ignore
-}>(stub)
+export { NavigationHistoryProvider }
 
 export function PolarPostHogProvider({
   children,
+  distinctId,
 }: {
-  children: React.ReactElement
+  children: React.ReactNode
+  distinctId: string
 }) {
-  const [persistence, setPersistence] = useState<
-    'localStorage' | 'sessionStorage' | 'cookie' | 'memory'
-  >(cookieConsentGiven() === 'yes' ? 'localStorage' : 'memory')
-  const posthog = useMemo(() => {
-    if (!CONFIG.POSTHOG_TOKEN) {
-      return null
-    }
-    return new PostHog(CONFIG.POSTHOG_TOKEN, {
-      host: '/ingest',
-      persistence,
-    })
-  }, [persistence])
-
-  const pathname = usePathname()
-  const searchParams = useSearchParams()
-  // Track pageviews
   useEffect(() => {
-    if (pathname) {
-      let url = window.origin + pathname
-      if (searchParams && searchParams.toString()) {
-        url = url + `?${searchParams.toString()}`
-      }
-      posthog?.capture('$pageview', {
-        $current_url: url,
-      })
+    if (!CONFIG.POSTHOG_TOKEN) {
+      return
     }
-  }, [pathname, searchParams, posthog])
 
-  return (
-    <PostHogContext.Provider value={{ client: posthog, setPersistence }}>
-      {children}
-    </PostHogContext.Provider>
-  )
+    posthog.init(CONFIG.POSTHOG_TOKEN, {
+      ui_host: 'https://us.i.posthog.com',
+      api_host: '/ingest',
+      defaults: '2025-05-24', // this enables automatic pageview tracking
+      persistence: cookieConsentGiven() === 'yes' ? 'localStorage' : 'memory',
+      bootstrap: {
+        distinctID: distinctId,
+      },
+    })
+  }, [distinctId])
+
+  return <PostHogProvider client={posthog}>{children}</PostHogProvider>
 }
 
 export function PolarThemeProvider({
   children,
   forceTheme,
 }: {
-  children: React.ReactElement
+  children: React.ReactNode
   forceTheme?: 'light' | 'dark'
 }) {
   const pathname = usePathname()
@@ -105,32 +73,12 @@ export function PolarThemeProvider({
 export function PolarQueryClientProvider({
   children,
 }: {
-  children: React.ReactElement
-}) {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <ReactQueryStreamedHydration>{children}</ReactQueryStreamedHydration>
-    </QueryClientProvider>
-  )
-}
-
-export function PolarToploaderProvider({
-  children,
-}: {
   children: React.ReactNode
 }) {
+  const queryClient = getQueryClient()
+
   return (
-    <>
-      {children}
-      <ProgressBar
-        height="2px"
-        color="#2960F6"
-        startPosition={0.08}
-        options={{ showSpinner: false }}
-        delay={500}
-        shallowRouting
-      />
-    </>
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   )
 }
 

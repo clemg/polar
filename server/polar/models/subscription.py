@@ -1,5 +1,7 @@
+import functools
+import operator
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Self
 from uuid import UUID
@@ -21,6 +23,7 @@ from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 from sqlalchemy.orm.attributes import OP_BULK_REPLACE, Event
 
+from polar.config import settings
 from polar.custom_field.data import CustomFieldDataMixin
 from polar.enums import SubscriptionRecurringInterval
 from polar.kit.db.models import RecordModel
@@ -36,6 +39,7 @@ if TYPE_CHECKING:
         BenefitGrant,
         Checkout,
         Customer,
+        CustomerSeat,
         Discount,
         Meter,
         Organization,
@@ -65,7 +69,7 @@ class SubscriptionStatus(StrEnum):
 
     @classmethod
     def revoked_statuses(cls) -> set[Self]:
-        return {cls.past_due, cls.canceled, cls.unpaid}  # type: ignore
+        return {cls.canceled, cls.unpaid}  # type: ignore
 
     @classmethod
     def billable_statuses(cls) -> set[Self]:
@@ -107,9 +111,26 @@ class Subscription(CustomFieldDataMixin, MetadataMixin, RecordModel):
     recurring_interval: Mapped[SubscriptionRecurringInterval] = mapped_column(
         StringEnum(SubscriptionRecurringInterval), nullable=False, index=True
     )
-    stripe_subscription_id: Mapped[str | None] = mapped_column(
+    recurring_interval_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    legacy_stripe_subscription_id: Mapped[str | None] = mapped_column(
         String, nullable=True, index=True, default=None
     )
+    """
+    Original ID of the subscription in Stripe.
+
+    If set, indicates that the subscription was originally managed by Stripe Billing,
+    but has been migrated to be managed by Polar.
+    """
+
+    tax_exempted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    """
+    Whether the subscription is tax exempted.
+
+    We use this to disable tax on subscriptions created before we were
+    registered in a given country, so we don't surprise customers with
+    tax charges.
+    """
 
     status: Mapped[SubscriptionStatus] = mapped_column(
         StringEnum(SubscriptionStatus), nullable=False
@@ -117,25 +138,34 @@ class Subscription(CustomFieldDataMixin, MetadataMixin, RecordModel):
     current_period_start: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
     )
-    current_period_end: Mapped[datetime] = mapped_column(
+    current_period_end: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True, default=None
+    )
+    trial_start: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True, default=None
+    )
+    trial_end: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True, default=None
     )
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False)
     canceled_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True, default=None
+        TIMESTAMP(timezone=True), nullable=True, default=None, index=True
     )
     started_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True, default=None
+        TIMESTAMP(timezone=True), nullable=True, default=None, index=True
     )
     ends_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True, default=None
+        TIMESTAMP(timezone=True), nullable=True, default=None, index=True
     )
     ended_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True, default=None, index=True
+    )
+    past_due_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True, default=None
     )
 
-    scheduler_locked: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, index=True
+    scheduler_locked_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True, default=None, index=True
     )
 
     customer_id: Mapped[UUID] = mapped_column(
@@ -211,6 +241,8 @@ class Subscription(CustomFieldDataMixin, MetadataMixin, RecordModel):
         Text, nullable=True
     )
 
+    seats: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+
     @declared_attr
     def checkout(cls) -> Mapped["Checkout | None"]:
         return relationship(
@@ -228,8 +260,26 @@ class Subscription(CustomFieldDataMixin, MetadataMixin, RecordModel):
             back_populates="subscription",
         )
 
+    @declared_attr
+    def customer_seats(cls) -> Mapped[list["CustomerSeat"]]:
+        return relationship(
+            "CustomerSeat",
+            lazy="raise",
+            back_populates="subscription",
+            cascade="all, delete-orphan",
+        )
+
     def is_incomplete(self) -> bool:
         return SubscriptionStatus.is_incomplete(self.status)
+
+    @hybrid_property
+    def trialing(self) -> bool:
+        return self.status == SubscriptionStatus.trialing
+
+    @trialing.inplace.expression
+    @classmethod
+    def _trialing_expression(cls) -> ColumnElement[bool]:
+        return cls.status == SubscriptionStatus.trialing
 
     @hybrid_property
     def active(self) -> bool:
@@ -256,6 +306,15 @@ class Subscription(CustomFieldDataMixin, MetadataMixin, RecordModel):
         )
 
     @hybrid_property
+    def canceled(self) -> bool:
+        return self.canceled_at is not None
+
+    @canceled.inplace.expression
+    @classmethod
+    def _canceled_expression(cls) -> ColumnElement[bool]:
+        return cls.canceled_at.is_not(None)
+
+    @hybrid_property
     def billable(self) -> bool:
         return SubscriptionStatus.is_billable(self.status)
 
@@ -265,6 +324,16 @@ class Subscription(CustomFieldDataMixin, MetadataMixin, RecordModel):
         return type_coerce(
             cls.status.in_(SubscriptionStatus.billable_statuses()),
             Boolean,
+        )
+
+    @property
+    def past_due_deadline(self) -> datetime | None:
+        if self.past_due_at is None:
+            return None
+        return (
+            self.past_due_at
+            + functools.reduce(operator.add, settings.DUNNING_RETRY_INTERVALS)
+            + timedelta(minutes=1)  # Add a minute to make sure we are past the deadline
         )
 
     def can_cancel(self, immediately: bool = False) -> bool:
@@ -280,6 +349,12 @@ class Subscription(CustomFieldDataMixin, MetadataMixin, RecordModel):
         if self.cancel_at_period_end or self.ends_at:
             return False
         return True
+
+    def can_uncancel(self) -> bool:
+        return (
+            self.cancel_at_period_end
+            and self.status in SubscriptionStatus.billable_statuses()
+        )
 
     def set_started_at(self) -> None:
         """

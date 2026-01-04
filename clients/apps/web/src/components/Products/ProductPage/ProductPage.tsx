@@ -2,8 +2,9 @@ import { ConfirmModal } from '@/components/Modal/ConfirmModal'
 import { useModal } from '@/components/Modal/useModal'
 import { toast } from '@/components/Toast/use-toast'
 import { useMetrics, useUpdateProduct } from '@/hooks/queries'
+import { apiErrorToast } from '@/utils/api/errors'
 import { getChartRangeParams } from '@/utils/metrics'
-import { MoreVert } from '@mui/icons-material'
+import MoreVert from '@mui/icons-material/MoreVert'
 import { schemas } from '@polar-sh/client'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import { Status } from '@polar-sh/ui/components/atoms/Status'
@@ -26,7 +27,6 @@ import { DashboardBody } from '../../Layout/DashboardLayout'
 import { ProductThumbnail } from '../ProductThumbnail'
 import { ProductMetricsView } from './ProductMetricsView'
 import { ProductOverview } from './ProductOverview'
-import { ProductPageContextView } from './ProductPageContextView'
 
 const ProductTypeDisplayColor: Record<string, string> = {
   subscription: 'bg-emerald-100 text-emerald-500 dark:bg-emerald-950',
@@ -50,6 +50,30 @@ export const ProductPage = ({ organization, product }: ProductPageProps) => {
     startDate: allTimeStart,
     endDate: allTimeEnd,
     interval: allTimeInterval,
+    metrics: product.is_recurring
+      ? [
+          // Subscription metrics
+          'monthly_recurring_revenue',
+          'committed_monthly_recurring_revenue',
+          'active_subscriptions',
+          'new_subscriptions',
+          'renewed_subscriptions',
+          'new_subscriptions_revenue',
+          'renewed_subscriptions_revenue',
+          // Order metrics
+          'revenue',
+          'orders',
+          'average_order_value',
+          'cumulative_revenue',
+        ]
+      : [
+          // One-time metrics
+          'one_time_products',
+          'one_time_products_revenue',
+          // Order metrics (excluding revenue and orders for one-time)
+          'average_order_value',
+          'cumulative_revenue',
+        ],
   })
   const { data: todayMetrics } = useMetrics({
     organization_id: organization.id,
@@ -57,6 +81,7 @@ export const ProductPage = ({ organization, product }: ProductPageProps) => {
     endDate: new Date(),
     interval: 'day',
     product_id: [product.id],
+    metrics: ['revenue'],
   })
 
   const updateProduct = useUpdateProduct(organization)
@@ -68,24 +93,60 @@ export const ProductPage = ({ organization, product }: ProductPageProps) => {
     show: showArchiveModal,
   } = useModal()
 
+  const {
+    isShown: isUnarchiveModalShown,
+    hide: hideUnarchiveModal,
+    show: showUnarchiveModal,
+  } = useModal()
+
   const handleArchiveProduct = useCallback(async () => {
-    await updateProduct.mutateAsync({
+    const { error } = await updateProduct.mutateAsync({
       id: product.id,
       body: { is_archived: true },
     })
 
-    router.push(`/dashboard/${organization.slug}/products`)
-  }, [product, updateProduct, organization, router])
+    if (error) {
+      apiErrorToast(error, toast, {
+        title: 'Error Archiving Product',
+      })
+      return
+    }
+
+    toast({
+      title: 'Product Archived',
+      description: 'Product has been successfully archived',
+    })
+  }, [product, updateProduct])
+
+  const handleUnarchiveProduct = useCallback(async () => {
+    const { error } = await updateProduct.mutateAsync({
+      id: product.id,
+      body: { is_archived: false },
+    })
+
+    if (error) {
+      apiErrorToast(error, toast, {
+        title: 'Error Unarchiving Product',
+      })
+      return
+    }
+
+    toast({
+      title: 'Product Unarchived',
+      description: 'Product has been successfully unarchived',
+    })
+  }, [product, updateProduct])
 
   return (
     <Tabs defaultValue="overview" className="h-full">
       <DashboardBody
         title={
-          <div className="flex flex-row items-center gap-6">
-            <div className="flex flex-row items-center gap-4">
+          <div className="flex min-w-0 flex-row items-center gap-4">
+            <div className="flex min-w-0 flex-row items-center gap-4">
               <ProductThumbnail product={product} />
-              <h1 className="text-2xl">{product.name}</h1>
+              <h1 className="truncate text-2xl">{product.name}</h1>
             </div>
+
             <div className="flex flex-row items-center gap-4">
               <Status
                 status={
@@ -107,55 +168,84 @@ export const ProductPage = ({ organization, product }: ProductPageProps) => {
           </div>
         }
         header={
-          !product.is_archived ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button size="icon" variant="secondary">
-                  <MoreVert fontSize="small" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onClick={() => {
-                    if (typeof navigator !== 'undefined') {
-                      navigator.clipboard.writeText(product.id)
-
-                      toast({
-                        title: 'Product ID Copied',
-                        description: 'Product ID copied to clipboard',
-                      })
-                    }
-                  }}
-                >
-                  Copy Product ID
-                </DropdownMenuItem>
-                <DropdownMenuItem
+          <div className="flex flex-row items-center justify-between gap-2">
+            {product.is_archived ? null : (
+              <div>
+                <Button
+                  size="sm"
+                  variant="secondary"
                   onClick={() => {
                     router.push(
-                      `/dashboard/${organization.slug}/onboarding/integrate?productId=${product.id}`,
+                      `/dashboard/${organization.slug}/products/${product.id}/edit`,
                     )
                   }}
                 >
-                  Integrate Checkout
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={showArchiveModal}>
-                  Archive Product
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : undefined
+                  Edit Product
+                </Button>
+              </div>
+            )}
+            <div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button size="icon" variant="secondary">
+                    <MoreVert fontSize="small" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    onClick={() => {
+                      if (typeof navigator !== 'undefined') {
+                        navigator.clipboard.writeText(product.id)
+
+                        toast({
+                          title: 'Product ID Copied',
+                          description: 'Product ID copied to clipboard',
+                        })
+                      }
+                    }}
+                  >
+                    Copy Product ID
+                  </DropdownMenuItem>
+                  {!product.is_archived && (
+                    <>
+                      <DropdownMenuItem
+                        onClick={() => {
+                          router.push(
+                            `/dashboard/${organization.slug}/onboarding/integrate?productId=${product.id}`,
+                          )
+                        }}
+                      >
+                        Integrate Checkout
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        onClick={() => {
+                          router.push(
+                            `/dashboard/${organization.slug}/products/new?fromProductId=${product.id}`,
+                          )
+                        }}
+                      >
+                        Duplicate Product
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem destructive onClick={showArchiveModal}>
+                        Archive Product
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                  {product.is_archived && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={showUnarchiveModal}>
+                        Unarchive Product
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          </div>
         }
-        contextViewClassName="hidden md:block"
-        contextView={
-          product.is_archived ? undefined : (
-            <ProductPageContextView
-              organization={organization}
-              product={product}
-            />
-          )
-        }
-        wide
       >
         <TabsList className="pb-8">
           <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -174,6 +264,7 @@ export const ProductPage = ({ organization, product }: ProductPageProps) => {
             data={metrics}
             interval={allTimeInterval}
             loading={metricsLoading}
+            product={product}
           />
         </TabsContent>
         <ConfirmModal
@@ -184,6 +275,14 @@ export const ProductPage = ({ organization, product }: ProductPageProps) => {
           hide={hideArchiveModal}
           destructiveText="Archive"
           destructive
+        />
+        <ConfirmModal
+          title="Unarchive Product"
+          description="Unarchiving this product will make it available for new subscribers and purchases again."
+          onConfirm={handleUnarchiveProduct}
+          isShown={isUnarchiveModalShown}
+          hide={hideUnarchiveModal}
+          destructiveText="Unarchive"
         />
       </DashboardBody>
     </Tabs>

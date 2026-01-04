@@ -1,7 +1,7 @@
 import { getServerSideAPI } from '@/utils/client/serverside'
 import { getOrganizationBySlugOrNotFound } from '@/utils/organization'
 import { Metadata } from 'next'
-import ClientPage from './ClientPage'
+import DashboardPage from './DashboardPage'
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
@@ -9,33 +9,15 @@ export async function generateMetadata(): Promise<Metadata> {
   }
 }
 
-export default async function Page({
-  params,
-}: {
-  params: { organization: string }
+export default async function Page(props: {
+  params: Promise<{ organization: string }>
 }) {
-  const api = getServerSideAPI()
+  const params = await props.params
+  const api = await getServerSideAPI()
   const organization = await getOrganizationBySlugOrNotFound(
     api,
     params.organization,
   )
 
-  const startOfMonth = new Date()
-  startOfMonth.setUTCHours(0, 0, 0, 0)
-  startOfMonth.setUTCDate(1)
-
-  const today = new Date()
-
-  const startOfMonthThreeMonthsAgo = new Date()
-  startOfMonthThreeMonthsAgo.setUTCHours(0, 0, 0, 0)
-  startOfMonthThreeMonthsAgo.setUTCDate(1)
-  startOfMonthThreeMonthsAgo.setUTCMonth(startOfMonth.getMonth() - 5)
-
-  return (
-    <ClientPage
-      organization={organization}
-      startDate={startOfMonthThreeMonthsAgo}
-      endDate={today}
-    />
-  )
+  return <DashboardPage organization={organization} />
 }

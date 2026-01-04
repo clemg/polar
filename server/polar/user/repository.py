@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 
 from polar.kit.repository import (
     RepositoryBase,
@@ -64,7 +64,6 @@ class UserRepository(
             self.get_base_statement(include_deleted=include_deleted)
             .join(User.oauth_accounts)
             .where(
-                OAuthAccount.deleted_at.is_(None),
                 OAuthAccount.platform == platform,
                 OAuthAccount.account_id == account_id,
             )
@@ -105,6 +104,19 @@ class UserRepository(
         if not included_blocked:
             statement = statement.where(User.blocked_at.is_(None))
         return await self.get_all(statement)
+
+    async def is_organization_member(
+        self,
+        user_id: UUID,
+        organization_id: UUID,
+    ) -> bool:
+        statement = select(UserOrganization).where(
+            UserOrganization.user_id == user_id,
+            UserOrganization.organization_id == organization_id,
+            UserOrganization.deleted_at.is_(None),
+        )
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none() is not None
 
     def get_sorting_clause(self, property: UserSortProperty) -> SortingClause:
         match property:

@@ -1,9 +1,13 @@
 import pytest
 from sqlalchemy import func, select
 
-from polar.event.repository import EventRepository
-from polar.kit.utils import utc_now
-from polar.meter.aggregation import AggregationFunction, PropertyAggregation
+from polar.meter.aggregation import (
+    Aggregation,
+    AggregationFunction,
+    CountAggregation,
+    PropertyAggregation,
+    UniqueAggregation,
+)
 from polar.models import Event, Organization
 from polar.postgres import AsyncSession
 from tests.fixtures.database import SaveFixture
@@ -17,10 +21,27 @@ def test_strip_metadata_prefix() -> None:
     assert aggregation.property == "property"
 
 
+@pytest.mark.parametrize(
+    ("aggregation", "expected_summable"),
+    [
+        (CountAggregation(), True),
+        (PropertyAggregation(func=AggregationFunction.sum, property="tokens"), True),
+        (PropertyAggregation(func=AggregationFunction.max, property="tokens"), False),
+        (PropertyAggregation(func=AggregationFunction.min, property="tokens"), False),
+        (PropertyAggregation(func=AggregationFunction.avg, property="tokens"), False),
+        (UniqueAggregation(property="user_id"), False),
+    ],
+    ids=["count", "sum", "max", "min", "avg", "unique"],
+)
+def test_aggregation_is_summable(
+    aggregation: Aggregation, expected_summable: bool
+) -> None:
+    assert aggregation.is_summable() is expected_summable
+
+
 async def _get_aggregation_result(
-    session: AsyncSession, aggregation: PropertyAggregation
+    session: AsyncSession, aggregation: Aggregation
 ) -> float:
-    repository = EventRepository.from_session(session)
     statement = select(func.coalesce(aggregation.get_sql_column(Event), 0.0)).where(
         aggregation.get_sql_clause(Event)
     )
@@ -36,7 +57,6 @@ class TestPropertyAggregation:
         session: AsyncSession,
         organization: Organization,
     ) -> None:
-        now = utc_now()
         events = [
             await create_event(
                 save_fixture,
@@ -70,7 +90,6 @@ class TestPropertyAggregation:
         session: AsyncSession,
         organization: Organization,
     ) -> None:
-        now = utc_now()
         events = [
             await create_event(
                 save_fixture,
@@ -104,7 +123,6 @@ class TestPropertyAggregation:
         session: AsyncSession,
         organization: Organization,
     ) -> None:
-        now = utc_now()
         events = [
             await create_event(
                 save_fixture,
@@ -116,3 +134,58 @@ class TestPropertyAggregation:
         aggregation = PropertyAggregation(func=AggregationFunction.sum, property="name")
 
         assert await _get_aggregation_result(session, aggregation) == 0.0
+
+    async def test_unique(
+        self,
+        save_fixture: SaveFixture,
+        session: AsyncSession,
+        organization: Organization,
+    ) -> None:
+        events = [
+            await create_event(
+                save_fixture,
+                organization=organization,
+                external_customer_id="customer_1",
+                metadata={
+                    "value": "ID_1",
+                },
+            ),
+            await create_event(
+                save_fixture,
+                organization=organization,
+                external_customer_id="customer_1",
+                metadata={
+                    "value": "ID_1",
+                },
+            ),
+            await create_event(
+                save_fixture,
+                organization=organization,
+                external_customer_id="customer_1",
+                metadata={
+                    "value": "ID_1",
+                },
+            ),
+            await create_event(
+                save_fixture,
+                organization=organization,
+                external_customer_id="customer_1",
+                metadata={
+                    "value": "ID_2",
+                },
+            ),
+            await create_event(
+                save_fixture,
+                organization=organization,
+                external_customer_id="customer_1",
+                metadata={
+                    "value": "ID_3",
+                },
+            ),
+        ]
+
+        aggregation = UniqueAggregation(
+            func=AggregationFunction.unique, property="value"
+        )
+
+        assert await _get_aggregation_result(session, aggregation) == 3.0

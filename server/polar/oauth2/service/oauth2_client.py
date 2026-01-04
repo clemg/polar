@@ -1,15 +1,15 @@
-import datetime
 from collections.abc import Sequence
+from typing import cast
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from polar.auth.models import AuthSubject
-from polar.email.renderer import get_email_renderer
+from polar.email.react import render_email_template
+from polar.email.schemas import OAuth2LeakedClientEmail, OAuth2LeakedClientProps
 from polar.email.sender import enqueue_email
 from polar.enums import TokenType
-from polar.exceptions import PolarError
 from polar.kit.crypto import generate_token
 from polar.kit.pagination import PaginationParams, paginate
 from polar.kit.services import ResourceServiceReader
@@ -20,9 +20,6 @@ from polar.postgres import AsyncSession
 from ..constants import CLIENT_REGISTRATION_TOKEN_PREFIX, CLIENT_SECRET_PREFIX
 
 log: Logger = structlog.get_logger()
-
-
-class OAuth2ClientError(PolarError): ...
 
 
 class OAuth2ClientService(ResourceServiceReader[OAuth2Client]):
@@ -92,23 +89,21 @@ class OAuth2ClientService(ResourceServiceReader[OAuth2Client]):
             )
         session.add(client)
 
-        email_renderer = get_email_renderer({"oauth2": "polar.oauth2"})
+        if client.user is not None:
+            email = client.user.email
+            body = render_email_template(
+                OAuth2LeakedClientEmail(
+                    props=OAuth2LeakedClientProps(
+                        email=email,
+                        token_type=token_type,
+                        client_name=cast(str, client.client_name),
+                        notifier=notifier,
+                        url=url or "",
+                    )
+                )
+            )
 
-        subject, body = email_renderer.render_from_template(
-            subject,
-            "oauth2/leaked_client.html",
-            {
-                "token_type": token_type,
-                "client_name": client.client_name,
-                "notifier": notifier,
-                "url": url,
-                "current_year": datetime.datetime.now().year,
-            },
-        )
-
-        enqueue_email(
-            to_email_addr=client.user.email, subject=subject, html_content=body
-        )
+            enqueue_email(to_email_addr=email, subject=subject, html_content=body)
 
         log.info(
             "Revoke leaked OAuth2 client",

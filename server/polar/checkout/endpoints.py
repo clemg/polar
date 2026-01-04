@@ -7,7 +7,7 @@ from sse_starlette.sse import EventSourceResponse
 from polar.customer.schemas.customer import CustomerID
 from polar.eventstream.endpoints import subscribe
 from polar.eventstream.service import Receivers
-from polar.exceptions import ResourceNotFound
+from polar.exceptions import PaymentNotReady, ResourceNotFound
 from polar.kit.pagination import ListResource, PaginationParamsQuery
 from polar.kit.schemas import (
     MultipleQueryFilter,
@@ -18,7 +18,12 @@ from polar.models import Checkout
 from polar.models.checkout import CheckoutStatus
 from polar.openapi import APITag
 from polar.organization.schemas import OrganizationID
-from polar.postgres import AsyncSession, get_db_session
+from polar.postgres import (
+    AsyncReadSession,
+    AsyncSession,
+    get_db_read_session,
+    get_db_session,
+)
 from polar.product.schemas import ProductID
 from polar.redis import Redis, get_redis
 from polar.routing import APIRouter
@@ -39,10 +44,11 @@ from .service import (
     ExpiredCheckoutError,
     NotOpenCheckout,
     PaymentError,
+    TrialAlreadyRedeemed,
 )
 from .service import checkout as checkout_service
 
-inner_router = APIRouter(tags=["checkouts", APITag.documented, APITag.featured])
+inner_router = APIRouter(tags=["checkouts", APITag.public])
 
 
 CheckoutID = Annotated[UUID4, Path(description="The checkout session ID.")]
@@ -62,9 +68,12 @@ CheckoutPaymentError = {
     "model": PaymentError.schema(),
 }
 CheckoutForbiddenError = {
-    "description": "The checkout is expired or the customer already has an active subscription.",
+    "description": "The checkout is expired, the customer already has an active subscription, or the organization is not ready to accept payments.",
     "model": Annotated[
-        AlreadyActiveSubscriptionError.schema() | NotOpenCheckout.schema(),
+        AlreadyActiveSubscriptionError.schema()
+        | NotOpenCheckout.schema()
+        | PaymentNotReady.schema()
+        | TrialAlreadyRedeemed.schema(),
         SetSchemaReference("CheckoutForbiddenError"),
     ],
 }
@@ -92,7 +101,7 @@ async def list(
         description="Filter by checkout session status.",
     ),
     query: str | None = Query(None, description="Filter by customer email."),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncReadSession = Depends(get_db_read_session),
 ) -> ListResource[CheckoutSchema]:
     """List checkout sessions."""
     results, count = await checkout_service.list(
@@ -123,7 +132,7 @@ async def list(
 async def get(
     id: CheckoutID,
     auth_subject: auth.CheckoutRead,
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncReadSession = Depends(get_db_read_session),
 ) -> Checkout:
     """Get a checkout session by ID."""
     checkout = await checkout_service.get_by_id(session, auth_subject, id)

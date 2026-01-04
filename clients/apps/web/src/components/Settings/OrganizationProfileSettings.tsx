@@ -1,42 +1,46 @@
+import { useAuth } from '@/hooks'
 import { useUpdateOrganization } from '@/hooks/queries'
+import { useAutoSave } from '@/hooks/useAutoSave'
 import { setValidationErrors } from '@/utils/api/errors'
-import {
-  AddOutlined,
-  AddPhotoAlternateOutlined,
-  CloseOutlined,
-  Facebook,
-  GitHub,
-  Instagram,
-  LinkedIn,
-  Public,
-  X,
-  YouTube,
-} from '@mui/icons-material'
+import AddOutlined from '@mui/icons-material/AddOutlined'
+import AddPhotoAlternateOutlined from '@mui/icons-material/AddPhotoAlternateOutlined'
+import CloseOutlined from '@mui/icons-material/CloseOutlined'
+import Facebook from '@mui/icons-material/Facebook'
+import GitHub from '@mui/icons-material/GitHub'
+import Instagram from '@mui/icons-material/Instagram'
+import LinkedIn from '@mui/icons-material/LinkedIn'
+import Public from '@mui/icons-material/Public'
+import X from '@mui/icons-material/X'
+import YouTube from '@mui/icons-material/YouTube'
 import { isValidationError, schemas } from '@polar-sh/client'
 import Avatar from '@polar-sh/ui/components/atoms/Avatar'
 import Button from '@polar-sh/ui/components/atoms/Button'
 import CopyToClipboardInput from '@polar-sh/ui/components/atoms/CopyToClipboardInput'
 import Input from '@polar-sh/ui/components/atoms/Input'
+import MoneyInput from '@polar-sh/ui/components/atoms/MoneyInput'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@polar-sh/ui/components/atoms/Select'
+import TextArea from '@polar-sh/ui/components/atoms/TextArea'
 import { Checkbox } from '@polar-sh/ui/components/ui/checkbox'
 import {
   Form,
   FormControl,
   FormField,
-  FormItem,
-  FormLabel,
   FormMessage,
 } from '@polar-sh/ui/components/ui/form'
-import {
-  RadioGroup,
-  RadioGroupItem,
-} from '@polar-sh/ui/components/ui/radio-group'
-import { Textarea } from '@polar-sh/ui/components/ui/textarea'
+import { useRouter } from 'next/navigation'
 import React, { useCallback } from 'react'
 import { FileRejection } from 'react-dropzone'
 import { useForm, useFormContext } from 'react-hook-form'
 import { twMerge } from 'tailwind-merge'
 import { FileObject, useFileUpload } from '../FileUpload'
 import { toast } from '../Toast/use-toast'
+import ConfirmationButton from '../ui/ConfirmationButton'
 import {
   SettingsGroup,
   SettingsGroupActions,
@@ -77,8 +81,7 @@ const SOCIAL_PLATFORM_DOMAINS = {
 }
 
 const OrganizationSocialLinks = () => {
-  const { control, watch, setValue } =
-    useFormContext<schemas['OrganizationUpdate']>()
+  const { watch, setValue } = useFormContext<schemas['OrganizationUpdate']>()
   const socials = watch('socials') || []
 
   const getIcon = (platform: string, className: string) => {
@@ -115,82 +118,83 @@ const OrganizationSocialLinks = () => {
   }
 
   const handleChange = (index: number, value: string) => {
-    if (!value) return
-
-    // Add protocol if missing
-    if (!value.startsWith('https://')) {
+    const currentFieldValue = socials[index]?.url
+    if (
+      currentFieldValue === '' &&
+      !value.startsWith('https://') &&
+      !value.startsWith('http://')
+    ) {
       value = 'https://' + value
-    } else if (value.startsWith('http://')) {
-      value = value.replace('http://', 'https://')
     }
 
+    // Infer the platform from the URL
+    let newPlatform: schemas['OrganizationSocialPlatforms'] = 'other'
     try {
       const url = new URL(value)
       const hostname = url.hostname as keyof typeof SOCIAL_PLATFORM_DOMAINS
-      const newPlatform = (SOCIAL_PLATFORM_DOMAINS[hostname] ??
+      newPlatform = (SOCIAL_PLATFORM_DOMAINS[hostname] ??
         'other') as schemas['OrganizationSocialPlatforms']
-
-      const updatedSocials = [...socials]
-      updatedSocials[index] = {
-        platform: newPlatform,
-        url: value,
-      }
-      setValue('socials', updatedSocials, { shouldDirty: true })
     } catch {}
+
+    // Update the socials array
+    const updatedSocials = [...socials]
+    updatedSocials[index] = { platform: newPlatform, url: value }
+    setValue('socials', updatedSocials, { shouldDirty: true })
   }
 
   return (
-    <div className="flex flex-col gap-y-4">
+    <div className="space-y-3">
       {socials.map((social, index) => (
-        <FormField
-          key={index}
-          control={control}
-          name={`socials.${index}`}
-          render={() => (
-            <FormItem>
-              <FormControl>
-                <div className="flex flex-row items-center gap-x-2">
-                  <div className="">
-                    {getIcon(social.platform, 'text-gray-400 h-4')}
-                  </div>
-                  <div className="flex grow">
-                    <Input
-                      value={social.url || ''}
-                      onChange={(e) => handleChange(index, e.target.value)}
-                      className="w-full"
-                      placeholder="https://"
-                    />
-                  </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-10 w-10"
-                    onClick={() => handleRemoveSocial(index)}
-                  >
-                    <CloseOutlined fontSize="small" />
-                  </Button>
-                </div>
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
+        <div key={index} className="flex items-center gap-3">
+          <div className="flex w-5 justify-center">
+            {getIcon(social.platform, 'text-gray-400 h-4 w-4')}
+          </div>
+          <Input
+            value={social.url || ''}
+            onChange={(e) => handleChange(index, e.target.value)}
+            placeholder="https://"
+            className="flex-1"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => handleRemoveSocial(index)}
+            className="text-gray-400 hover:text-gray-600"
+          >
+            <CloseOutlined fontSize="small" />
+          </Button>
+        </div>
       ))}
       <Button
         type="button"
+        size="sm"
         variant="secondary"
         onClick={handleAddSocial}
-        className="self-start"
-        size="sm"
-        wrapperClassNames="flex flex-row items-center gap-x-2"
       >
-        <AddOutlined fontSize="small" />
-        Add
+        <AddOutlined fontSize="small" className="mr-1" />
+        Add Social
       </Button>
     </div>
   )
 }
+
+const CompactTextArea = ({
+  field,
+  placeholder,
+  rows = 3,
+}: {
+  field: any
+  placeholder: string
+  rows?: number
+}) => (
+  <TextArea
+    {...field}
+    rows={rows}
+    placeholder={placeholder}
+    className="resize-none"
+  />
+)
 
 export const OrganizationDetailsForm: React.FC<
   OrganizationDetailsFormProps
@@ -199,7 +203,6 @@ export const OrganizationDetailsForm: React.FC<
     useFormContext<schemas['OrganizationUpdate']>()
   const name = watch('name')
   const avatarURL = watch('avatar_url')
-  const isSwitching = watch('details.switching')
 
   const onFilesUpdated = useCallback(
     (files: FileObject<schemas['OrganizationAvatarFileRead']>[]) => {
@@ -236,338 +239,357 @@ export const OrganizationDetailsForm: React.FC<
   })
 
   return (
-    <>
-      <SettingsGroupItem
-        title="Organization Name"
-        description="What customers will see in checkout & receipts"
-      >
-        <FormField
-          control={control}
-          name="name"
-          rules={{ required: 'This field is required.' }}
-          render={({ field }) => (
-            <>
-              <FormControl>
-                <Input {...field} value={field.value || ''} />
-              </FormControl>
-              <FormMessage />
-            </>
-          )}
-        />
-      </SettingsGroupItem>
-      <SettingsGroupItem
-        title="Logotype"
-        description="Used to identify your organization"
-      >
-        <div
-          {...getRootProps()}
-          className={twMerge('group relative', isDragActive && 'opacity-50')}
-        >
-          <input id="logo-input" {...getInputProps()} />
-          <Avatar
-            avatar_url={avatarURL ?? ''}
-            name={name ?? ''}
-            className={twMerge(
-              'h-16 w-16 group-hover:opacity-50',
-              isDragActive && 'opacity-50',
-            )}
-          />
-          <div
-            className={twMerge(
-              'absolute left-0 top-0 h-16 w-16 cursor-pointer items-center justify-center group-hover:flex',
-              isDragActive ? 'flex' : 'hidden',
-            )}
-          >
-            <AddPhotoAlternateOutlined />
+    <div className="space-y-8">
+      {/* Basic Info - Always Visible */}
+      <div className="space-y-6">
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-12">
+          <div className="sm:col-span-2">
+            <label className="mb-2 block text-sm font-medium">Logo</label>
+            <FormField
+              control={control}
+              name="avatar_url"
+              render={() => (
+                <div>
+                  <div
+                    {...getRootProps()}
+                    className={twMerge(
+                      'relative cursor-pointer',
+                      isDragActive && 'opacity-50',
+                    )}
+                  >
+                    <input {...getInputProps()} />
+                    <Avatar
+                      avatar_url={avatarURL ?? ''}
+                      name={name ?? ''}
+                      className="h-16 w-16 transition-opacity hover:opacity-75"
+                    />
+                    <div className="absolute inset-0 flex items-center justify-center opacity-0 transition-opacity hover:opacity-100">
+                      <AddPhotoAlternateOutlined className="text-gray-600" />
+                    </div>
+                  </div>
+                  <FormMessage className="mt-2 text-xs/snug" />
+                </div>
+              )}
+            />
+          </div>
+
+          <div className="space-y-4 sm:col-span-10">
+            <div>
+              <label className="mb-2 block text-sm font-medium">
+                Organization Name *
+              </label>
+              <FormField
+                control={control}
+                name="name"
+                rules={{ required: 'Organization name is required' }}
+                render={({ field }) => (
+                  <div>
+                    <Input
+                      {...field}
+                      value={field.value || ''}
+                      placeholder="Acme Inc"
+                    />
+                    <FormMessage />
+                  </div>
+                )}
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-medium">
+                Support Email *
+              </label>
+              <FormField
+                control={control}
+                name="email"
+                rules={{ required: 'Support email is required' }}
+                render={({ field }) => (
+                  <div>
+                    <Input
+                      type="email"
+                      {...field}
+                      value={field.value || ''}
+                      placeholder="support@acme.com"
+                    />
+                    <FormMessage />
+                  </div>
+                )}
+              />
+            </div>
           </div>
         </div>
-      </SettingsGroupItem>
-      <SettingsGroupItem
-        title="Website"
-        description="Website associated with your organization"
-      >
-        <FormField
-          control={control}
-          name="website"
-          render={({ field }) => (
-            <>
-              <FormControl>
+
+        <div>
+          <label className="mb-2 block text-sm font-medium">Website</label>
+          <FormField
+            control={control}
+            name="website"
+            render={({ field }) => (
+              <div>
                 <Input
                   type="url"
                   {...field}
                   value={field.value || ''}
-                  placeholder="https://"
+                  placeholder="https://acme.com"
                 />
-              </FormControl>
-              <FormMessage />
-            </>
-          )}
-        />
-      </SettingsGroupItem>
-      <SettingsGroupItem
-        title="Support Email"
-        description="Where customers can contact you"
-      >
-        <FormField
-          control={control}
-          name="email"
-          render={({ field }) => (
-            <>
-              <FormControl>
-                <Input
-                  type="email"
-                  {...field}
-                  value={field.value || ''}
-                  placeholder="support@example.com"
-                  required
-                />
-              </FormControl>
-              <FormMessage />
-            </>
-          )}
-        />
-      </SettingsGroupItem>
-      <SettingsGroupItem
-        title="Social media"
-        description="Your social media presence"
-        vertical
-      >
-        <OrganizationSocialLinks />
-      </SettingsGroupItem>
-      {inKYCMode && (
-        <>
-          <SettingsGroupItem
-            title="Compliance Information"
-            description="Please fill this out accurately &amp; thoroughly for our reviews"
+                <FormMessage />
+              </div>
+            )}
           />
-          <SettingsGroupItem title="About you and your business">
-            <FormField
-              control={control}
-              name="details.about"
-              render={({ field }) => (
-                <>
-                  <FormControl>
-                    <Textarea
-                      {...field}
-                      placeholder="I'm the founder of AcmeCo - building a SaaS application for easier uptime monitoring for developers."
+        </div>
+
+        {/* Social Links - Progressive Disclosure */}
+        <div>
+          <div className="mb-4 flex flex-col items-start">
+            <label className="block text-sm font-medium">Social Media</label>
+            <p className="mt-2 text-xs text-gray-600">
+              Social media links help with your account review. They will not be
+              shown publicly.
+            </p>
+          </div>
+          <OrganizationSocialLinks />
+        </div>
+      </div>
+
+      {/* Business Details - KYC Mode Only */}
+      {inKYCMode && (
+        <div className="border-t pt-8">
+          <div className="mb-6">
+            <h3 className="mb-2 text-lg font-medium">Business Details</h3>
+            <p className="text-sm text-gray-600">
+              Help us understand your business for compliance and payment setup.
+            </p>
+          </div>
+
+          <div className="space-y-6">
+            <div>
+              <label className="mb-2 block text-sm font-medium">
+                Describe your business *
+              </label>
+              <p className="mb-2 text-xs text-gray-600">
+                Tell us: what industry you&apos;re in, what problem you solve,
+                and who your customers are
+              </p>
+              <FormField
+                control={control}
+                name="details.about"
+                rules={{
+                  required: 'Please describe your business',
+                  minLength: {
+                    value: 50,
+                    message: 'Please provide at least 50 characters',
+                  },
+                  maxLength: {
+                    value: 3000,
+                    message: 'Please keep under 3000 characters',
+                  },
+                }}
+                render={({ field }) => (
+                  <div>
+                    <CompactTextArea
+                      field={field}
+                      placeholder="We make project management software for design teams."
                     />
-                  </FormControl>
-                  <FormMessage />
-                </>
-              )}
-            />
-          </SettingsGroupItem>
-          <SettingsGroupItem title="Describe the product">
-            <FormField
-              control={control}
-              name="details.product_description"
-              render={({ field }) => (
-                <>
-                  <FormControl>
-                    <Textarea
-                      {...field}
-                      placeholder="We'll sell SaaS tiers with different credits for uptime monitoring combined with one-time purchases for some premium add-on features."
+                    <div className="mt-1 flex items-center justify-between">
+                      <FormMessage />
+                      <span className="text-xs text-gray-500">
+                        {field.value?.length || 0}/3000 characters (min 50)
+                      </span>
+                    </div>
+                  </div>
+                )}
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-medium">
+                What do you sell? Include type and features that are granted *
+              </label>
+              <p className="mb-2 text-xs text-gray-600">
+                Tell us: product type (SaaS, course, service, etc.) and main
+                features (advanced reporting, team collaboration, etc.)
+              </p>
+              <FormField
+                control={control}
+                name="details.product_description"
+                rules={{
+                  required: 'Please describe what you sell',
+                  minLength: {
+                    value: 50,
+                    message: 'Please provide at least 50 characters',
+                  },
+                  maxLength: {
+                    value: 3000,
+                    message: 'Please keep under 3000 characters',
+                  },
+                }}
+                render={({ field }) => (
+                  <div>
+                    <CompactTextArea
+                      field={field}
+                      placeholder="SaaS project management tool with team collaboration, file sharing, and reporting. $29/month per user."
                     />
-                  </FormControl>
-                  <FormMessage />
-                </>
-              )}
-            />
-          </SettingsGroupItem>
-          <SettingsGroupItem title="How do you plan on using Polar?">
-            <FormField
-              control={control}
-              name="details.intended_use"
-              render={({ field }) => (
-                <>
-                  <FormControl>
-                    <Textarea
-                      {...field}
-                      className="w-full"
-                      placeholder="We will integrate the API & Webhooks within our service and use checkout links to promote products on social media. Finally, we will use Polar license keys to validate access to our desktop app."
+                    <div className="mt-1 flex items-center justify-between">
+                      <FormMessage />
+                      <span className="text-xs text-gray-500">
+                        {field.value?.length || 0}/3000 characters (min 50)
+                      </span>
+                    </div>
+                  </div>
+                )}
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-medium">
+                How will you integrate Polar into your business? *
+              </label>
+              <p className="mb-2 text-xs text-gray-600">
+                Tell us: where customers will see Polar, what features
+                you&apos;ll use, and how it fits your workflow
+              </p>
+              <FormField
+                control={control}
+                name="details.intended_use"
+                rules={{
+                  required: 'Please describe how you will use Polar',
+                  minLength: {
+                    value: 30,
+                    message: 'Please provide at least 30 characters',
+                  },
+                  maxLength: {
+                    value: 3000,
+                    message: 'Please keep under 3000 characters',
+                  },
+                }}
+                render={({ field }) => (
+                  <div>
+                    <CompactTextArea
+                      field={field}
+                      placeholder="Checkout on our website, API for subscription billing, webhooks for user access"
                     />
-                  </FormControl>
-                  <FormMessage />
-                </>
-              )}
-            />
-          </SettingsGroupItem>
-          <SettingsGroupItem title="Main channels for customer acquisition">
-            <FormField
-              control={control}
-              name="details.customer_acquisition"
-              render={({ field }) => (
-                <>
-                  <FormControl>
-                    <ul className="flex w-full flex-col gap-y-2">
+                    <div className="mt-1 flex items-center justify-between">
+                      <FormMessage />
+                      <span className="text-xs text-gray-500">
+                        {field.value?.length || 0}/3000 characters (min 30)
+                      </span>
+                    </div>
+                  </div>
+                )}
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-medium">
+                Main customer acquisition channels *
+              </label>
+              <FormField
+                control={control}
+                name="details.customer_acquisition"
+                rules={{
+                  required: 'Please select at least one acquisition channel',
+                  validate: (value) =>
+                    (value && value.length > 0) ||
+                    'Please select at least one channel',
+                }}
+                render={({ field }) => (
+                  <div>
+                    <div className="space-y-2">
                       {Object.entries(AcquisitionOptions).map(
                         ([key, label]) => (
-                          <li
+                          <label
                             key={key}
-                            className="flex flex-row items-center gap-x-4"
+                            className="flex cursor-pointer items-center gap-2"
                           >
                             <Checkbox
-                              id={`acquisition-${key}`}
-                              defaultChecked={
-                                field.value ? field.value.includes(key) : false
-                              }
+                              checked={field.value?.includes(key) || false}
                               onCheckedChange={(checked) => {
+                                const current = field.value || []
                                 if (checked) {
-                                  field.onChange([...(field.value || []), key])
+                                  field.onChange([...current, key])
                                 } else {
                                   field.onChange(
-                                    (field.value || []).filter(
-                                      (v) => v !== key,
-                                    ),
+                                    current.filter((v) => v !== key),
                                   )
                                 }
                               }}
                             />
-                            <FormLabel htmlFor={`acquisition-${key}`}>
-                              {label}
-                            </FormLabel>
-                          </li>
+                            <span className="text-sm">{label}</span>
+                          </label>
                         ),
                       )}
-                    </ul>
-                  </FormControl>
-                  <FormMessage />
-                </>
-              )}
-            />
-          </SettingsGroupItem>
-
-          <SettingsGroupItem
-            title="Estimated sales per year"
-            description="How much do you expect to sell for in a year?"
-          >
-            <FormField
-              control={control}
-              name="details.future_annual_revenue"
-              render={({ field }) => (
-                <>
-                  <FormControl>
-                    <Input
-                      {...field}
-                      type="number"
-                      value={field.value || ''}
-                      placeholder="1000"
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </>
-              )}
-            />
-          </SettingsGroupItem>
-
-          <SettingsGroupItem
-            title="Switching from another platform"
-            description="If you are currently selling on another platform, please select the platform you are currently using."
-          >
-            <FormField
-              control={control}
-              name="details.switching"
-              render={({ field }) => (
-                <>
-                  <FormControl>
-                    <div className="flex w-full flex-row items-center gap-x-4">
-                      <RadioGroup
-                        value={field.value ? '1' : '0'}
-                        onValueChange={(value) => field.onChange(value === '1')}
-                      >
-                        <ul className="flex flex-col gap-y-2">
-                          <li className="flex flex-row items-center gap-x-4">
-                            <RadioGroupItem id={`switching-false`} value="0" />
-                            <FormLabel htmlFor={`switching-false`}>
-                              No
-                            </FormLabel>
-                          </li>
-                          <li className="flex flex-row items-center gap-x-4">
-                            <RadioGroupItem id={`switching-true`} value="1" />
-                            <FormLabel htmlFor={`switching-true`}>
-                              Yes
-                            </FormLabel>
-                          </li>
-                        </ul>
-                      </RadioGroup>
                     </div>
-                  </FormControl>
-                  <FormMessage />
-                </>
-              )}
-            />
-          </SettingsGroupItem>
+                    <FormMessage className="mt-2" />
+                  </div>
+                )}
+              />
+            </div>
 
-          {isSwitching && (
-            <>
-              <SettingsGroupItem
-                title="Switching from another platform"
-                description="If you are currently selling on another platform, please select the platform you are currently using."
-              >
+            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+              <div>
+                <label className="mb-2 block text-sm font-medium">
+                  Expected annual revenue *
+                </label>
+                <FormField
+                  control={control}
+                  name="details.future_annual_revenue"
+                  render={({ field }) => (
+                    <div>
+                      <MoneyInput
+                        {...field}
+                        placeholder={100_000_000}
+                        className="w-full"
+                      />
+                      <FormMessage />
+                    </div>
+                  )}
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium">
+                  Currently using
+                </label>
                 <FormField
                   control={control}
                   name="details.switching_from"
                   render={({ field }) => (
-                    <>
-                      <FormControl>
-                        <RadioGroup
-                          className="w-full"
-                          value={field.value ?? 'other'}
-                          onValueChange={field.onChange}
-                        >
-                          <ul className="flex w-full flex-col gap-y-2">
-                            {Object.entries(SwitchingFromOptions).map(
-                              ([key, label]) => (
-                                <li
-                                  key={key}
-                                  className="flex flex-row items-center gap-x-4"
-                                >
-                                  <RadioGroupItem
-                                    id={`switching-from-${key}`}
-                                    value={key}
-                                  />
-                                  <FormLabel htmlFor={`switching-from-${key}`}>
-                                    {label}
-                                  </FormLabel>
-                                </li>
-                              ),
-                            )}
-                          </ul>
-                        </RadioGroup>
-                      </FormControl>
+                    <div>
+                      <Select
+                        value={field.value || 'none'}
+                        onValueChange={(value) => {
+                          field.onChange(value === 'none' ? undefined : value)
+                          setValue('details.switching', value !== 'none', {
+                            shouldDirty: true,
+                          })
+                        }}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select a platform" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">
+                            This is my first payment platform
+                          </SelectItem>
+                          {Object.entries(SwitchingFromOptions).map(
+                            ([key, label]) => (
+                              <SelectItem key={key} value={key}>
+                                {label}
+                              </SelectItem>
+                            ),
+                          )}
+                        </SelectContent>
+                      </Select>
                       <FormMessage />
-                    </>
+                    </div>
                   )}
                 />
-              </SettingsGroupItem>
-
-              <SettingsGroupItem
-                title="How much did you sell for last year?"
-                description="How much did you sell for last year?"
-              >
-                <FormField
-                  control={control}
-                  name="details.previous_annual_revenue"
-                  render={({ field }) => (
-                    <>
-                      <FormControl>
-                        <Input
-                          {...field}
-                          type="number"
-                          value={field.value || ''}
-                          placeholder="1000"
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </>
-                  )}
-                />
-              </SettingsGroupItem>
-            </>
-          )}
-        </>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
-    </>
+    </div>
   )
 }
 
@@ -580,45 +602,89 @@ interface OrganizationProfileSettingsProps {
 const OrganizationProfileSettings: React.FC<
   OrganizationProfileSettingsProps
 > = ({ organization, kyc, onSubmitted }) => {
+  const router = useRouter()
   const form = useForm<schemas['OrganizationUpdate']>({
     defaultValues: organization,
   })
   const { handleSubmit, setError, formState, reset } = form
   const inKYCMode = kyc === true
 
+  const { currentUser } = useAuth()
+
   const updateOrganization = useUpdateOrganization()
 
-  const onSubmit = async (body: schemas['OrganizationUpdate']) => {
+  const onSave = async (body: schemas['OrganizationUpdate']) => {
+    const emptySocials =
+      body.socials?.filter(
+        (social) => !social.url || social.url.trim() === '',
+      ) || []
+    const cleanedBody = {
+      ...body,
+      socials: body.socials?.filter(
+        (social) => social.url && social.url.trim() !== '',
+      ),
+    }
+
     const { data, error } = await updateOrganization.mutateAsync({
       id: organization.id,
-      body,
+      body: cleanedBody,
+      userId: currentUser?.id,
     })
 
     if (error) {
+      const errorMessage = Array.isArray(error.detail)
+        ? error.detail[0]?.msg ||
+          'An error occurred while updating the organization'
+        : typeof error.detail === 'string'
+          ? error.detail
+          : 'An error occurred while updating the organization'
+
       if (isValidationError(error.detail)) {
         setValidationErrors(error.detail, setError)
       } else {
-        setError('root', { message: error.detail })
+        setError('root', { message: errorMessage })
       }
+
+      toast({
+        title: 'Organization Update Failed',
+        description: errorMessage,
+      })
 
       return
     }
 
-    reset(data)
-
-    toast({
-      title: 'Organization Updated',
-      description: `Organization was updated successfully`,
+    reset({
+      ...data,
+      socials: [...(data.socials || []), ...emptySocials],
     })
+
+    // Refresh the router to get the updated organization data from the server
+    router.refresh()
 
     if (onSubmitted) {
       onSubmitted()
     }
   }
 
+  const handleFormSubmit = () => {
+    handleSubmit(onSave)()
+  }
+
+  useAutoSave({
+    form,
+    onSave,
+    delay: 1000,
+    enabled: !inKYCMode,
+  })
+
   return (
     <Form {...form}>
-      <form onSubmit={handleSubmit(onSubmit)}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+        }}
+        className="max-w-2xl"
+      >
         <SettingsGroup>
           {!inKYCMode && (
             <>
@@ -656,20 +722,27 @@ const OrganizationProfileSettings: React.FC<
               </SettingsGroupItem>
             </>
           )}
-          <OrganizationDetailsForm
-            organization={organization}
-            inKYCMode={inKYCMode}
-          />
-          <SettingsGroupActions>
-            <Button
-              type="submit"
-              disabled={!formState.isDirty}
-              loading={updateOrganization.isPending}
-              size="sm"
-            >
-              {inKYCMode ? 'Submit' : 'Save'}
-            </Button>
-          </SettingsGroupActions>
+          <div className="flex flex-col gap-y-4 p-4">
+            <OrganizationDetailsForm
+              organization={organization}
+              inKYCMode={inKYCMode}
+            />
+          </div>
+
+          {inKYCMode && (
+            <SettingsGroupActions>
+              <ConfirmationButton
+                onConfirm={handleFormSubmit}
+                warningMessage="This information cannot be changed once submitted. Are you sure?"
+                buttonText="Submit for Review"
+                size="default"
+                confirmText="Submit"
+                disabled={!formState.isDirty}
+                loading={updateOrganization.isPending}
+                requireConfirmation={true}
+              />
+            </SettingsGroupActions>
+          )}
         </SettingsGroup>
       </form>
     </Form>

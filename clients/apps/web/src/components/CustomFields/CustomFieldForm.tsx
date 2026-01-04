@@ -1,4 +1,4 @@
-import { ClearOutlined } from '@mui/icons-material'
+import ClearOutlined from '@mui/icons-material/ClearOutlined'
 import { enums, schemas } from '@polar-sh/client'
 import {
   Accordion,
@@ -83,22 +83,54 @@ const CustomFieldTextProperties = () => {
 }
 
 const CustomFieldComparableProperties = () => {
-  const { control } = useFormContext<
+  const { control, watch } = useFormContext<
     (schemas['CustomFieldCreate'] | schemas['CustomFieldUpdate']) & {
       type: 'number' | 'datetime'
     }
   >()
+  const geValue = watch('properties.ge')
+  const leValue = watch('properties.le')
+
   return (
     <>
       <FormField
         control={control}
         name="properties.ge"
+        rules={{
+          validate: {
+            integer: (value) => {
+              if (!value && value !== 0) {
+                return true
+              }
+              const num = Number(value)
+              if (isNaN(num) || !Number.isInteger(num)) {
+                return 'Value must be a valid integer'
+              }
+              const INT32_MIN = -(2 ** 31)
+              const INT32_MAX = 2 ** 31 - 1
+              if (num < INT32_MIN || num > INT32_MAX) {
+                return 'Value is out of range'
+              }
+              return true
+            },
+            leThanLe: (value) => {
+              if ((value || value === 0) && (leValue || leValue === 0)) {
+                const ge = Number(value)
+                const le = Number(leValue)
+                if (!isNaN(ge) && !isNaN(le) && ge > le) {
+                  return 'Must be less than or equal to "Less than or equal" value'
+                }
+              }
+              return true
+            },
+          },
+        }}
         render={({ field }) => {
           return (
             <FormItem>
               <FormLabel>Greater than or equal</FormLabel>
               <FormControl>
-                <Input {...field} type="number" />
+                <Input {...field} type="number" step="1" />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -108,12 +140,41 @@ const CustomFieldComparableProperties = () => {
       <FormField
         control={control}
         name="properties.le"
+        rules={{
+          validate: {
+            integer: (value) => {
+              if (!value && value !== 0) {
+                return true
+              }
+              const num = Number(value)
+              if (isNaN(num) || !Number.isInteger(num)) {
+                return 'Value must be a valid integer'
+              }
+              const INT32_MIN = -(2 ** 31)
+              const INT32_MAX = 2 ** 31 - 1
+              if (num < INT32_MIN || num > INT32_MAX) {
+                return 'Value is out of range'
+              }
+              return true
+            },
+            geThanGe: (value) => {
+              if ((value || value === 0) && (geValue || geValue === 0)) {
+                const le = Number(value)
+                const ge = Number(geValue)
+                if (!isNaN(le) && !isNaN(ge) && le < ge) {
+                  return 'Must be greater than or equal to "Greater than or equal" value'
+                }
+              }
+              return true
+            },
+          },
+        }}
         render={({ field }) => {
           return (
             <FormItem>
               <FormLabel>Less than or equal</FormLabel>
               <FormControl>
-                <Input {...field} type="number" />
+                <Input {...field} type="number" step="1" />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -307,7 +368,7 @@ const CustomFieldForm: React.FC<CustomFieldFormBaseProps> = ({ update }) => {
                 name="properties.textarea"
                 render={({ field }) => {
                   return (
-                    <FormItem className="flex flex-row items-center space-x-2 space-y-0">
+                    <FormItem className="flex flex-row items-center space-y-0 space-x-2">
                       <FormControl>
                         <Switch
                           checked={field.value}

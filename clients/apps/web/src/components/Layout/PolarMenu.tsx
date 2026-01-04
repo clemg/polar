@@ -40,19 +40,19 @@ const PolarMenu = ({
   return (
     <div className="flex h-9 flex-row items-center gap-x-6">
       {authenticatedUser ? (
-        <div className="relative flex w-max flex-shrink-0 flex-row items-center justify-between gap-x-6">
+        <div className="relative flex w-max shrink-0 flex-row items-center justify-between gap-x-6">
           {hasOrgs && (
             <Link href={creatorPath}>
               <Button>
                 <div className="flex flex-row items-center gap-x-2">
-                  <span className="whitespace-nowrap text-xs">Dashboard</span>
+                  <span className="text-xs whitespace-nowrap">Dashboard</span>
                 </div>
               </Button>
             </Link>
           )}
           <PublicProfileDropdown
             authenticatedUser={authenticatedUser}
-            className="flex-shrink-0"
+            className="shrink-0"
           />
         </div>
       ) : (

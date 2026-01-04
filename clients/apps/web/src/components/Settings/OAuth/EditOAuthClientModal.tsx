@@ -25,11 +25,10 @@ import {
   FieldTOS,
 } from './OAuthForm'
 
-export interface EnhancedOAuth2ClientConfigurationUpdate
-  extends Omit<
-    schemas['OAuth2ClientConfigurationUpdate'],
-    'redirect_uris' | 'scope'
-  > {
+export interface EnhancedOAuth2ClientConfigurationUpdate extends Omit<
+  schemas['OAuth2ClientConfigurationUpdate'],
+  'redirect_uris' | 'scope'
+> {
   redirect_uris: { uri: string }[]
   scope: string[]
 }
@@ -118,7 +117,7 @@ export const EditOAuthClientModal = ({
   }, [hideDeleteModal, onDelete, client, deleteOAuthClient])
 
   return (
-    <div className="flex flex-col overflow-y-auto">
+    <div className="flex flex-col">
       <InlineModalHeader hide={onHide}>
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-xl">Edit OAuth App</h2>

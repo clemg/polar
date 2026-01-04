@@ -3,11 +3,13 @@ import secrets
 import string
 from math import ceil
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from polar.config import settings
 from polar.email.react import render_email_template
+from polar.email.schemas import LoginCodeEmail, LoginCodeProps
 from polar.email.sender import enqueue_email
 from polar.exceptions import PolarError
 from polar.kit.crypto import get_token_hash
@@ -17,6 +19,8 @@ from polar.postgres import AsyncSession
 from polar.user.repository import UserRepository
 from polar.user.schemas import UserSignupAttribution
 from polar.user.service import user as user_service
+
+log = structlog.get_logger()
 
 
 class LoginCodeError(PolarError): ...
@@ -61,19 +65,29 @@ class LoginCodeService:
         delta = login_code.expires_at - utc_now()
         code_lifetime_minutes = int(ceil(delta.seconds / 60))
 
+        email = login_code.email
         subject = "Sign in to Polar"
         body = render_email_template(
-            "login_code",
-            {
-                "code": code,
-                "code_lifetime_minutes": code_lifetime_minutes,
-                "current_year": datetime.datetime.now().year,
-            },
+            LoginCodeEmail(
+                props=LoginCodeProps(
+                    email=email,
+                    code=code,
+                    code_lifetime_minutes=code_lifetime_minutes,
+                )
+            )
         )
 
-        enqueue_email(
-            to_email_addr=login_code.email, subject=subject, html_content=body
-        )
+        enqueue_email(to_email_addr=email, subject=subject, html_content=body)
+
+        if settings.is_development():
+            log.info(
+                "\n"
+                "╔══════════════════════════════════════════════════════════╗\n"
+                "║                                                          ║\n"
+                f"║                   🔑 LOGIN CODE: {code}                  ║\n"
+                "║                                                          ║\n"
+                "╚══════════════════════════════════════════════════════════╝"
+            )
 
     async def authenticate(
         self,
@@ -83,6 +97,12 @@ class LoginCodeService:
         *,
         signup_attribution: UserSignupAttribution | None = None,
     ) -> tuple[User, bool]:
+        app_review_bypass = await self._try_app_review_bypass(
+            session, code, email, signup_attribution
+        )
+        if app_review_bypass is not None:
+            return app_review_bypass
+
         code_hash = get_token_hash(code, secret=settings.SECRET)
 
         statement = (
@@ -117,6 +137,29 @@ class LoginCodeService:
 
         await session.delete(login_code)
 
+        return user, is_signup
+
+    async def _try_app_review_bypass(
+        self,
+        session: AsyncSession,
+        code: str,
+        email: str,
+        signup_attribution: UserSignupAttribution | None,
+    ) -> tuple[User, bool] | None:
+        if not (settings.APP_REVIEW_EMAIL and settings.APP_REVIEW_OTP_CODE):
+            return None
+
+        if email.lower() != settings.APP_REVIEW_EMAIL.lower():
+            return None
+
+        if code != settings.APP_REVIEW_OTP_CODE:
+            return None
+
+        user, is_signup = await user_service.get_by_email_or_create(
+            session,
+            email,
+            signup_attribution=signup_attribution,
+        )
         return user, is_signup
 
     def _generate_code_hash(self) -> tuple[str, str]:

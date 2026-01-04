@@ -1,14 +1,13 @@
 import { getServerSideAPI } from '@/utils/client/serverside'
 import { getOrganizationOrNotFound } from '@/utils/customerPortal'
 import type { Metadata } from 'next'
-import ClientPage from './ClientPage'
+import AuthenticatePage from './AuthenticatePage'
 
-export async function generateMetadata({
-  params,
-}: {
-  params: { organization: string }
+export async function generateMetadata(props: {
+  params: Promise<{ organization: string }>
 }): Promise<Metadata> {
-  const api = getServerSideAPI()
+  const params = await props.params
+  const api = await getServerSideAPI()
   const { organization } = await getOrganizationOrNotFound(
     api,
     params.organization,
@@ -45,18 +44,18 @@ export async function generateMetadata({
   }
 }
 
-export default async function Page({
-  params,
-  searchParams,
-}: {
-  params: { organization: string }
-  searchParams: { customer_session_token?: string }
+export default async function Page(props: {
+  params: Promise<{ organization: string }>
+  searchParams: Promise<{ customer_session_token?: string }>
 }) {
-  const api = getServerSideAPI(searchParams.customer_session_token)
+  const { customer_session_token, ...searchParams } = await props.searchParams
+  const params = await props.params
+  const api = await getServerSideAPI(customer_session_token)
   const { organization } = await getOrganizationOrNotFound(
     api,
     params.organization,
+    searchParams,
   )
 
-  return <ClientPage organization={organization} />
+  return <AuthenticatePage organization={organization} />
 }

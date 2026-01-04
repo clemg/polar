@@ -1,7 +1,8 @@
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 from uuid import UUID
 
+import stripe as stripe_lib
 from sqlalchemy import (
     Boolean,
     ColumnElement,
@@ -22,8 +23,10 @@ from polar.kit.metadata import MetadataMixin
 if TYPE_CHECKING:
     from polar.models import (
         Customer,
+        Dispute,
         Order,
         Organization,
+        Payment,
         Pledge,
         Subscription,
     )
@@ -46,6 +49,7 @@ class RefundReason(StrEnum):
     customer_request = "customer_request"
     service_disruption = "service_disruption"
     satisfaction_guarantee = "satisfaction_guarantee"
+    dispute_prevention = "dispute_prevention"
     other = "other"
 
     @classmethod
@@ -92,20 +96,7 @@ class RefundFailureReason(StrEnum):
     merchant_request = "merchant_request"
 
     @classmethod
-    def from_stripe(
-        cls,
-        reason: (
-            Literal[
-                "lost_or_stolen_card",
-                "expired_or_canceled_card",
-                "charge_for_pending_refund_disputed",
-                "insufficient_funds",
-                "merchant_request",
-                "unknown",
-            ]
-            | None
-        ),
-    ) -> "RefundFailureReason | None":
+    def from_stripe(cls, reason: str | None) -> "RefundFailureReason | None":
         if reason is None:
             return None
 
@@ -140,6 +131,14 @@ class Refund(MetadataMixin, RecordModel):
     destination_details: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict
     )
+
+    payment_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("payments.id"), nullable=False, index=True
+    )
+
+    @declared_attr
+    def payment(cls) -> Mapped["Payment"]:
+        return relationship("Payment", lazy="raise")
 
     order_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("orders.id"), nullable=True, index=True
@@ -182,6 +181,14 @@ class Refund(MetadataMixin, RecordModel):
     @declared_attr
     def pledge(cls) -> Mapped["Pledge | None"]:
         return relationship("Pledge", lazy="raise")
+
+    dispute_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("disputes.id"), nullable=True
+    )
+
+    @declared_attr
+    def dispute(cls) -> Mapped["Dispute | None"]:
+        return relationship("Dispute", lazy="raise")
 
     # Created refund was set to revoke customer benefits?
     revoke_benefits: Mapped[bool] = mapped_column(
@@ -230,3 +237,46 @@ class Refund(MetadataMixin, RecordModel):
     @classmethod
     def _total_amount_expression(cls) -> ColumnElement[int]:
         return cls.amount + cls.tax_amount
+
+    @classmethod
+    def from_stripe(
+        cls, stripe_refund: stripe_lib.Refund, order: Order, payment: Payment
+    ) -> Self:
+        amount, tax_amount = order.calculate_refunded_tax_from_total(
+            stripe_refund.amount
+        )
+
+        failure_reason = getattr(stripe_refund, "failure_reason", None)
+        failure_reason = RefundFailureReason.from_stripe(failure_reason)
+        stripe_reason = stripe_refund.reason if stripe_refund.reason else "other"
+        reason = RefundReason.from_stripe(stripe_refund.reason)
+
+        status = RefundStatus.pending
+        if stripe_refund.status:
+            status = RefundStatus(stripe_refund.status)
+
+        balance_transaction_id: str | None = None
+        if stripe_refund.balance_transaction:
+            balance_transaction_id = str(stripe_refund.balance_transaction)
+
+        return cls(
+            status=status,
+            reason=reason,
+            amount=amount,
+            tax_amount=tax_amount,
+            currency=stripe_refund.currency,
+            failure_reason=failure_reason,
+            destination_details=getattr(stripe_refund, "destination_details", {}),
+            payment=payment,
+            order=order,
+            subscription=order.subscription,
+            organization=order.organization,
+            customer=order.customer,
+            pledge=None,
+            dispute=None,
+            processor=PaymentProcessor.stripe,
+            processor_id=stripe_refund.id,
+            processor_reason=stripe_reason,
+            processor_receipt_number=stripe_refund.receipt_number,
+            processor_balance_transaction_id=balance_transaction_id,
+        )

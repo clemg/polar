@@ -2,11 +2,12 @@ import contextlib
 import functools
 from collections.abc import Awaitable, Callable
 from enum import IntEnum
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, ParamSpec
 
 import dramatiq
 import logfire
 import redis
+import structlog
 from apscheduler.triggers.cron import CronTrigger
 from dramatiq import actor as _actor
 from dramatiq import middleware
@@ -15,18 +16,32 @@ from dramatiq.brokers.redis import RedisBroker
 from polar.config import settings
 from polar.logfire import instrument_httpx
 
+# Import metrics FIRST to set PROMETHEUS_MULTIPROC_DIR before prometheus_client is imported
+from polar.observability import metrics as _prometheus_metrics
+
 from ._encoder import JSONEncoder
-from ._enqueue import JobQueueManager, enqueue_events, enqueue_job
+from ._enqueue import (
+    BulkJobDelayCalculator,
+    JobQueueManager,
+    enqueue_events,
+    enqueue_job,
+    make_bulk_job_delay_calculator,
+)
 from ._health import HealthMiddleware
+from ._httpx import HTTPXMiddleware
+from ._memory import MemoryMonitorMiddleware
+from ._metrics import PrometheusMiddleware
 from ._redis import RedisMiddleware
 from ._sqlalchemy import AsyncSessionMaker, SQLAlchemyMiddleware
+
+_ = _prometheus_metrics  # for mypy and ruff: ensure import is used
 
 
 class MaxRetriesMiddleware(dramatiq.Middleware):
     """Middleware to set the max_retries option for a message."""
 
     def before_process_message(
-        self, broker: dramatiq.Broker, message: dramatiq.Message[Any]
+        self, broker: dramatiq.Broker, message: dramatiq.MessageProxy
     ) -> None:
         actor = broker.get_actor(message.actor_name)
         max_retries = message.options.get(
@@ -67,6 +82,32 @@ class SchedulerMiddleware(dramatiq.Middleware):
 scheduler_middleware = SchedulerMiddleware()
 
 
+class LogContextMiddleware(dramatiq.Middleware):
+    """Middleware to manage log context for each message."""
+
+    def before_process_message(
+        self, broker: dramatiq.Broker, message: dramatiq.MessageProxy
+    ) -> None:
+        structlog.contextvars.bind_contextvars(
+            actor_name=message.actor_name, message_id=message.message_id
+        )
+
+    def after_process_message(
+        self,
+        broker: dramatiq.Broker,
+        message: dramatiq.MessageProxy,
+        *,
+        result: Any | None = None,
+        exception: BaseException | None = None,
+    ) -> None:
+        structlog.contextvars.unbind_contextvars("actor_name", "message_id")
+
+    def after_skip_message(
+        self, broker: dramatiq.Broker, message: dramatiq.MessageProxy
+    ) -> None:
+        return self.after_process_message(broker, message)
+
+
 class LogfireMiddleware(dramatiq.Middleware):
     """Middleware to manage a Logfire span when handling a message."""
 
@@ -76,7 +117,7 @@ class LogfireMiddleware(dramatiq.Middleware):
         instrument_httpx()
 
     def before_process_message(
-        self, broker: dramatiq.Broker, message: dramatiq.Message[Any]
+        self, broker: dramatiq.Broker, message: dramatiq.MessageProxy
     ) -> None:
         logfire_stack = contextlib.ExitStack()
         actor_name = message.actor_name
@@ -93,10 +134,10 @@ class LogfireMiddleware(dramatiq.Middleware):
     def after_process_message(
         self,
         broker: dramatiq.Broker,
-        message: dramatiq.Message[Any],
+        message: dramatiq.MessageProxy,
         *,
         result: Any | None = None,
-        exception: Exception | None = None,
+        exception: BaseException | None = None,
     ) -> None:
         logfire_stack: contextlib.ExitStack | None = message.options.pop(
             "logfire_stack", None
@@ -105,7 +146,7 @@ class LogfireMiddleware(dramatiq.Middleware):
             logfire_stack.close()
 
     def after_skip_message(
-        self, broker: dramatiq.Broker, message: dramatiq.Message[Any]
+        self, broker: dramatiq.Broker, message: dramatiq.MessageProxy
     ) -> None:
         return self.after_process_message(broker, message)
 
@@ -124,6 +165,7 @@ broker = RedisBroker(
             middleware.ShutdownNotifications,
         )
     ],
+    dead_message_ttl=3600 * 1000,  # 1 hour in milliseconds
 )
 
 broker.add_middleware(
@@ -132,14 +174,18 @@ broker.add_middleware(
         min_backoff=settings.WORKER_MIN_BACKOFF_MILLISECONDS,
     )
 )
+broker.add_middleware(MemoryMonitorMiddleware())
 broker.add_middleware(HealthMiddleware())
 broker.add_middleware(middleware.AsyncIO())
 broker.add_middleware(middleware.CurrentMessage())
 broker.add_middleware(MaxRetriesMiddleware())
 broker.add_middleware(SQLAlchemyMiddleware())
 broker.add_middleware(RedisMiddleware())
+broker.add_middleware(HTTPXMiddleware())
 broker.add_middleware(scheduler_middleware)
 broker.add_middleware(LogfireMiddleware())
+broker.add_middleware(LogContextMiddleware())
+broker.add_middleware(PrometheusMiddleware())
 dramatiq.set_broker(broker)
 dramatiq.set_encoder(JSONEncoder())
 
@@ -150,18 +196,32 @@ class TaskPriority(IntEnum):
     LOW = 100
 
 
+class TaskQueue:
+    HIGH_PRIORITY = "high_priority"
+    MEDIUM_PRIORITY = "medium_priority"
+    LOW_PRIORITY = "low_priority"
+
+
 P = ParamSpec("P")
-R = TypeVar("R")
 
 
-def actor(
+def actor[**P, R](
     actor_class: Callable[..., dramatiq.Actor[Any, Any]] = dramatiq.Actor,
     actor_name: str | None = None,
-    queue_name: str = "default",
+    queue_name: str | None = None,
     priority: TaskPriority = TaskPriority.LOW,
     broker: dramatiq.Broker | None = None,
     **options: Any,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
+    if queue_name is None:
+        match priority:
+            case TaskPriority.LOW:
+                queue_name = TaskQueue.LOW_PRIORITY
+            case TaskPriority.MEDIUM:
+                queue_name = TaskQueue.MEDIUM_PRIORITY
+            case TaskPriority.HIGH:
+                queue_name = TaskQueue.HIGH_PRIORITY
+
     def decorator(
         fn: Callable[P, Awaitable[R]],
     ) -> Callable[P, Awaitable[R]]:
@@ -188,14 +248,19 @@ def actor(
 
 
 __all__ = [
-    "actor",
-    "CronTrigger",
     "AsyncSessionMaker",
-    "RedisMiddleware",
+    "BulkJobDelayCalculator",
+    "CronTrigger",
+    "HTTPXMiddleware",
     "JobQueueManager",
-    "scheduler_middleware",
-    "enqueue_job",
-    "enqueue_events",
-    "get_retries",
+    "RedisMiddleware",
+    "TaskPriority",
+    "TaskQueue",
+    "actor",
     "can_retry",
+    "enqueue_events",
+    "enqueue_job",
+    "get_retries",
+    "make_bulk_job_delay_calculator",
+    "scheduler_middleware",
 ]

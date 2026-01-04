@@ -1,10 +1,9 @@
-import math
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
 
-import stripe as stripe_lib
+from dateutil.relativedelta import relativedelta
 from sqlalchemy import (
     TIMESTAMP,
     Column,
@@ -26,17 +25,12 @@ from sqlalchemy.orm import (
     relationship,
 )
 
-from polar.config import settings
 from polar.kit.db.models import RecordModel
+from polar.kit.math import polar_round
 from polar.kit.metadata import MetadataMixin
-from polar.kit.utils import utc_now
 
 if TYPE_CHECKING:
     from . import DiscountProduct, DiscountRedemption, Organization, Product
-
-
-def get_expires_at() -> datetime:
-    return utc_now() + timedelta(seconds=settings.MAGIC_LINK_TTL_SECONDS)
 
 
 class DiscountType(StrEnum):
@@ -95,10 +89,6 @@ class Discount(MetadataMixin, RecordModel):
     duration: Mapped[DiscountDuration] = mapped_column(String, nullable=False)
     duration_in_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    stripe_coupon_id: Mapped[str] = mapped_column(
-        String, nullable=False, unique=True, index=True
-    )
-
     organization_id: Mapped[UUID] = mapped_column(
         Uuid,
         ForeignKey("organizations.id", ondelete="cascade"),
@@ -140,23 +130,29 @@ class Discount(MetadataMixin, RecordModel):
     def get_discount_amount(self, amount: int) -> int:
         raise NotImplementedError()
 
-    def get_stripe_coupon_params(self) -> stripe_lib.Coupon.CreateParams:
-        params: stripe_lib.Coupon.CreateParams = {
-            "name": self.name[:40],
-            "duration": cast(Literal["once", "forever", "repeating"], self.duration),
-            "metadata": {
-                "discount_id": str(self.id),
-                "organization_id": str(self.organization.id),
-            },
-        }
-        if self.duration_in_months is not None:
-            params["duration_in_months"] = self.duration_in_months
-        return params
-
     def is_applicable(self, product: "Product") -> bool:
         if len(self.products) == 0:
             return True
         return product in self.products
+
+    def is_repetition_expired(
+        self,
+        started_at: datetime,
+        current_period_start: datetime,
+        trial_ended: bool = False,
+    ) -> bool:
+        if self.duration == DiscountDuration.once:
+            # If transitioning from trial to active, this is the first billed cycle
+            # so the discount should still apply
+            return not trial_ended
+        if self.duration == DiscountDuration.forever:
+            return False
+        if self.duration_in_months is None:
+            return False
+
+        # -1 because the first month counts as a first repetition
+        end_at = started_at + relativedelta(months=self.duration_in_months - 1)
+        return current_period_start > end_at
 
     __mapper_args__ = {
         "polymorphic_on": "type",
@@ -173,14 +169,6 @@ class DiscountFixed(Discount):
     def get_discount_amount(self, amount: int) -> int:
         return min(self.amount, amount)
 
-    def get_stripe_coupon_params(self) -> stripe_lib.Coupon.CreateParams:
-        params = super().get_stripe_coupon_params()
-        return {
-            **params,
-            "amount_off": self.amount,
-            "currency": self.currency,
-        }
-
     __mapper_args__ = {
         "polymorphic_identity": DiscountType.fixed,
         "polymorphic_load": "inline",
@@ -195,18 +183,7 @@ class DiscountPercentage(Discount):
 
     def get_discount_amount(self, amount: int) -> int:
         discount_amount_float = amount * (self.basis_points / 10_000)
-        return (
-            math.ceil(discount_amount_float)
-            if discount_amount_float - int(discount_amount_float) >= 0.5
-            else math.floor(discount_amount_float)
-        )
-
-    def get_stripe_coupon_params(self) -> stripe_lib.Coupon.CreateParams:
-        params = super().get_stripe_coupon_params()
-        return {
-            **params,
-            "percent_off": self.basis_points / 100,
-        }
+        return polar_round(discount_amount_float)
 
     __mapper_args__ = {
         "polymorphic_identity": DiscountType.percentage,

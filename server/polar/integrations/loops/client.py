@@ -34,6 +34,7 @@ class Properties(TypedDict, total=False):
     productCreated: bool
     userPatCreated: bool
     storefrontEnabled: bool
+    webhooksCreated: bool
 
     accountType: AccountType
 
@@ -99,4 +100,4 @@ class LoopsClient:
 
 client = LoopsClient(settings.LOOPS_API_KEY)
 
-__all__ = ["client", "Properties"]
+__all__ = ["Properties", "client"]

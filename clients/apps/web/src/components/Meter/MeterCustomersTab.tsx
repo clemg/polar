@@ -47,6 +47,7 @@ const MeterCustomersTab = ({
       data={customerMeters?.items ?? []}
       pagination={pagination}
       onPaginationChange={setPagination}
+      rowCount={customerMeters?.pagination.total_count ?? 0}
       pageCount={customerMeters?.pagination.max_page ?? 1}
       sorting={sorting}
       onSortingChange={setSorting}
@@ -64,7 +65,7 @@ const MeterCustomersTab = ({
             },
           }) => (
             <Link
-              href={`/dashboard/${organization.slug}/customers?customerId=${customer.id}`}
+              href={`/dashboard/${organization.slug}/customers/${customer.id}`}
               className="flex items-center gap-x-3"
             >
               <Avatar

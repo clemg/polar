@@ -2,11 +2,12 @@ import builtins
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import UUID4, Discriminator, Field, Tag, computed_field
+from pydantic import UUID4, Discriminator, Field, Tag, computed_field, field_validator
 from pydantic.aliases import AliasChoices
+from pydantic.json_schema import SkipJsonSchema
 
 from polar.benefit.schemas import Benefit, BenefitID, BenefitPublic
-from polar.custom_field.attachment import (
+from polar.custom_field.schemas import (
     AttachedCustomField,
     AttachedCustomFieldListCreate,
 )
@@ -26,8 +27,10 @@ from polar.kit.schemas import (
     SetSchemaReference,
     TimestampedSchema,
 )
+from polar.kit.trial import TrialConfigurationInputMixin, TrialConfigurationOutputMixin
 from polar.models.product_price import (
     ProductPriceAmountType,
+    ProductPriceSource,
     ProductPriceType,
 )
 from polar.models.product_price import (
@@ -42,9 +45,15 @@ from polar.models.product_price import (
 from polar.models.product_price import (
     ProductPriceMeteredUnit as ProductPriceMeteredUnitModel,
 )
+from polar.models.product_price import (
+    ProductPriceSeatUnit as ProductPriceSeatUnitModel,
+)
 from polar.organization.schemas import OrganizationID
 
 PRODUCT_NAME_MIN_LENGTH = 3
+
+# PostgreSQL int4 range limit
+INT_MAX_VALUE = 2_147_483_647
 
 # Product
 
@@ -68,10 +77,18 @@ PriceAmount = Annotated[
         description="The price in cents.",
     ),
 ]
+SeatPriceAmount = Annotated[
+    int,
+    Field(
+        ...,
+        ge=0,
+        le=MAXIMUM_PRICE_AMOUNT,
+        description="The price per seat in cents. Can be 0 for free tiers.",
+    ),
+]
 PriceCurrency = Annotated[
     str,
     Field(
-        default="usd",
         pattern="usd",
         description="The currency. Currently, only `usd` is supported.",
     ),
@@ -104,7 +121,7 @@ class ProductPriceFixedCreate(ProductPriceCreateBase):
 
     amount_type: Literal[ProductPriceAmountType.fixed]
     price_amount: PriceAmount
-    price_currency: PriceCurrency
+    price_currency: PriceCurrency = "usd"
 
     def get_model_class(self) -> builtins.type[ProductPriceFixedModel]:
         return ProductPriceFixedModel
@@ -116,7 +133,7 @@ class ProductPriceCustomCreate(ProductPriceCreateBase):
     """
 
     amount_type: Literal[ProductPriceAmountType.custom]
-    price_currency: PriceCurrency
+    price_currency: PriceCurrency = "usd"
     minimum_amount: PriceAmount | None = Field(
         default=None, ge=50, description="The minimum amount the customer can pay."
     )
@@ -146,6 +163,89 @@ class ProductPriceFreeCreate(ProductPriceCreateBase):
         return ProductPriceFreeModel
 
 
+class ProductPriceSeatTier(Schema):
+    """
+    A pricing tier for seat-based pricing.
+    """
+
+    min_seats: int = Field(ge=1, description="Minimum number of seats (inclusive)")
+    max_seats: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum number of seats (inclusive). None for unlimited.",
+    )
+    price_per_seat: SeatPriceAmount = Field(
+        description="Price per seat in cents for this tier"
+    )
+
+
+class ProductPriceSeatTiers(Schema):
+    """
+    List of pricing tiers for seat-based pricing.
+    """
+
+    tiers: list[ProductPriceSeatTier] = Field(
+        min_length=1, description="List of pricing tiers"
+    )
+
+    @field_validator("tiers")
+    @classmethod
+    def validate_tiers(
+        cls, v: list[ProductPriceSeatTier]
+    ) -> list[ProductPriceSeatTier]:
+        """Validate that tiers form continuous ranges without gaps or overlaps."""
+        if not v:
+            raise ValueError("At least one tier is required")
+
+        # Sort by min_seats
+        sorted_tiers = sorted(v, key=lambda t: t.min_seats)
+
+        # Ensure first tier starts at 1
+        if sorted_tiers[0].min_seats != 1:
+            raise ValueError("First tier must start at min_seats=1")
+
+        # Validate continuous ranges without gaps/overlaps
+        for i in range(len(sorted_tiers) - 1):
+            current = sorted_tiers[i]
+            next_tier = sorted_tiers[i + 1]
+
+            if current.max_seats is None:
+                raise ValueError(
+                    "Only the last tier can have unlimited max_seats (None)"
+                )
+
+            if next_tier.min_seats != current.max_seats + 1:
+                raise ValueError(
+                    "Gap or overlap between tiers: "
+                    + f"tier ending at {current.max_seats} and tier starting at {next_tier.min_seats}"
+                )
+
+        # Ensure last tier has unlimited max_seats
+        last_tier = sorted_tiers[-1]
+        if last_tier.max_seats is not None:
+            raise ValueError(
+                "Last tier must have unlimited max_seats (None). "
+                + f"Currently set to {last_tier.max_seats}."
+            )
+
+        return sorted_tiers
+
+
+class ProductPriceSeatBasedCreate(ProductPriceCreateBase):
+    """
+    Schema to create a seat-based price with volume-based tiers.
+    """
+
+    amount_type: Literal[ProductPriceAmountType.seat_based]
+    price_currency: PriceCurrency = "usd"
+    seat_tiers: ProductPriceSeatTiers = Field(
+        description="Tiered pricing based on seat quantity"
+    )
+
+    def get_model_class(self) -> builtins.type[ProductPriceSeatUnitModel]:
+        return ProductPriceSeatUnitModel
+
+
 class ProductPriceMeteredCreateBase(ProductPriceCreateBase):
     meter_id: UUID4 = Field(description="The ID of the meter associated to the price.")
 
@@ -156,7 +256,7 @@ class ProductPriceMeteredUnitCreate(ProductPriceMeteredCreateBase):
     """
 
     amount_type: Literal[ProductPriceAmountType.metered_unit]
-    price_currency: PriceCurrency
+    price_currency: PriceCurrency = "usd"
     unit_amount: Decimal = Field(
         gt=0,
         max_digits=17,
@@ -166,6 +266,7 @@ class ProductPriceMeteredUnitCreate(ProductPriceMeteredCreateBase):
     cap_amount: int | None = Field(
         default=None,
         ge=0,
+        le=INT_MAX_VALUE,
         description=(
             "Optional maximum amount in cents that can be charged, "
             "regardless of the number of units consumed."
@@ -176,12 +277,14 @@ class ProductPriceMeteredUnitCreate(ProductPriceMeteredCreateBase):
         return ProductPriceMeteredUnitModel
 
 
-ProductPriceCreate = (
+ProductPriceCreate = Annotated[
     ProductPriceFixedCreate
     | ProductPriceCustomCreate
     | ProductPriceFreeCreate
-    | ProductPriceMeteredUnitCreate
-)
+    | ProductPriceSeatBasedCreate
+    | ProductPriceMeteredUnitCreate,
+    Discriminator("amount_type"),
+]
 
 
 ProductPriceCreateList = Annotated[
@@ -200,19 +303,9 @@ ProductPriceCreateList = Annotated[
 ]
 
 
-class ProductCreate(MetadataInputMixin, Schema):
-    """
-    Schema to create a product.
-    """
-
+class ProductCreateBase(MetadataInputMixin, Schema):
     name: ProductName
     description: ProductDescription = None
-    recurring_interval: SubscriptionRecurringInterval | None = Field(
-        description=(
-            "The recurring interval of the product. "
-            "If `None`, the product is a one-time purchase."
-        ),
-    )
     prices: ProductPriceCreateList = Field(
         ...,
         description="List of available prices for this product. "
@@ -238,6 +331,41 @@ class ProductCreate(MetadataInputMixin, Schema):
     )
 
 
+class ProductCreateRecurring(TrialConfigurationInputMixin, ProductCreateBase):
+    recurring_interval: SubscriptionRecurringInterval = Field(
+        description=(
+            "The recurring interval of the product. "
+            "Note that the `day` and `week` values are for internal Polar staff use only."
+        ),
+    )
+    recurring_interval_count: int = Field(
+        default=1,
+        ge=1,
+        le=999,
+        description=(
+            "Number of interval units of the subscription. "
+            "If this is set to 1 the charge will happen every interval (e.g. every month), "
+            "if set to 2 it will be every other month, and so on."
+        ),
+    )
+
+
+class ProductCreateOneTime(ProductCreateBase):
+    recurring_interval: Literal[None] = Field(
+        default=None, description="States that the product is a one-time purchase."
+    )
+    recurring_interval_count: Literal[None] = Field(
+        default=None,
+        description="One-time products don't have a recurring interval count.",
+    )
+
+
+ProductCreate = Annotated[
+    ProductCreateRecurring | ProductCreateOneTime,
+    SetSchemaReference("ProductCreate"),
+]
+
+
 class ExistingProductPrice(Schema):
     """
     A price that already exists for this product.
@@ -253,7 +381,7 @@ ProductPriceUpdate = Annotated[
 ]
 
 
-class ProductUpdate(MetadataInputMixin, Schema):
+class ProductUpdate(TrialConfigurationInputMixin, MetadataInputMixin, Schema):
     """
     Schema to update a product.
     """
@@ -266,6 +394,17 @@ class ProductUpdate(MetadataInputMixin, Schema):
             "The recurring interval of the product. "
             "If `None`, the product is a one-time purchase. "
             "**Can only be set on legacy recurring products. "
+            "Once set, it can't be changed.**"
+        ),
+    )
+    recurring_interval_count: int | None = Field(
+        default=None,
+        ge=1,
+        le=999,
+        description=(
+            "Number of interval units of the subscription. "
+            "If this is set to 1 the charge will happen every interval (e.g. every month), "
+            "if set to 2 it will be every other month, and so on. "
             "Once set, it can't be changed.**"
         ),
     )
@@ -312,6 +451,13 @@ class ProductBenefitsUpdate(Schema):
 
 class ProductPriceBase(TimestampedSchema):
     id: UUID4 = Field(description="The ID of the price.")
+    source: ProductPriceSource = Field(
+        description=(
+            "The source of the price . "
+            "`catalog` is a predefined price, "
+            "while `ad_hoc` is a price created dynamically on a Checkout session."
+        )
+    )
     amount_type: ProductPriceAmountType = Field(
         description="The type of amount, either fixed or custom."
     )
@@ -360,6 +506,29 @@ class ProductPriceCustomBase(ProductPriceBase):
 
 class ProductPriceFreeBase(ProductPriceBase):
     amount_type: Literal[ProductPriceAmountType.free]
+
+
+class ProductPriceSeatBasedBase(ProductPriceBase):
+    amount_type: Literal[ProductPriceAmountType.seat_based]
+    price_currency: str = Field(description="The currency.")
+    seat_tiers: ProductPriceSeatTiers = Field(
+        description="Tiered pricing based on seat quantity"
+    )
+
+    @computed_field(
+        description="Price per seat in cents from the first tier.",
+        deprecated=(
+            "Use `seat_tiers` instead. "
+            "The tiered pricing system supports volume-based pricing with multiple tiers. "
+            "This field returns only the first tier's price for backward compatibility."
+        ),
+    )
+    def price_per_seat(self) -> SkipJsonSchema[int]:
+        """Return price_per_seat from first tier for backward compatibility."""
+        if not self.seat_tiers.tiers:
+            # This shouldn't happen due to validation, but protect against it
+            raise ValueError("seat_tiers must contain at least one tier")
+        return self.seat_tiers.tiers[0].price_per_seat
 
 
 class LegacyRecurringProductPriceMixin:
@@ -446,6 +615,12 @@ class ProductPriceFree(ProductPriceFreeBase):
     """
 
 
+class ProductPriceSeatBased(ProductPriceSeatBasedBase):
+    """
+    A seat-based price for a product.
+    """
+
+
 class ProductPriceMeter(IDSchema):
     """
     A meter associated to a metered price.
@@ -473,7 +648,11 @@ class ProductPriceMeteredUnit(ProductPriceBase):
 
 
 NewProductPrice = Annotated[
-    ProductPriceFixed | ProductPriceCustom | ProductPriceFree | ProductPriceMeteredUnit,
+    ProductPriceFixed
+    | ProductPriceCustom
+    | ProductPriceFree
+    | ProductPriceSeatBased
+    | ProductPriceMeteredUnit,
     Discriminator("amount_type"),
     SetSchemaReference("ProductPrice"),
 ]
@@ -493,13 +672,22 @@ ProductPrice = Annotated[
 ]
 
 
-class ProductBase(IDSchema, TimestampedSchema):
-    id: UUID4 = Field(description="The ID of the product.")
+class ProductBase(TrialConfigurationOutputMixin, TimestampedSchema, IDSchema):
     name: str = Field(description="The name of the product.")
     description: str | None = Field(description="The description of the product.")
     recurring_interval: SubscriptionRecurringInterval | None = Field(
-        description="The recurring interval of the product. "
-        "If `None`, the product is a one-time purchase."
+        description=(
+            "The recurring interval of the product. "
+            "If `None`, the product is a one-time purchase."
+        )
+    )
+    recurring_interval_count: int | None = Field(
+        description=(
+            "Number of interval units of the subscription. "
+            "If this is set to 1 the charge will happen every interval (e.g. every month), "
+            "if set to 2 it will be every other month, and so on. "
+            "None for one-time products."
+        )
     )
     is_recurring: bool = Field(description="Whether the product is a subscription.")
     is_archived: bool = Field(

@@ -1,29 +1,34 @@
-import hashlib
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from alembic_utils.pg_function import PGFunction
+from alembic_utils.pg_trigger import PGTrigger
+from alembic_utils.replaceable_entity import register_entities
 from sqlalchemy import (
     Boolean,
     ColumnElement,
     ForeignKey,
-    String,
+    Index,
+    Integer,
     Text,
     Uuid,
     case,
     or_,
     select,
 )
-from sqlalchemy.dialects.postgresql import CITEXT
+from sqlalchemy.dialects.postgresql import CITEXT, TSVECTOR
 from sqlalchemy.ext.associationproxy import AssociationProxy, association_proxy
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 from polar.enums import SubscriptionRecurringInterval
 from polar.kit.db.models import RecordModel
-from polar.kit.extensions.sqlalchemy import StrEnumType
+from polar.kit.extensions.sqlalchemy import StringEnum
 from polar.kit.metadata import MetadataMixin
-from polar.models.product_price import ProductPriceType
+from polar.kit.tax import TaxCode
+from polar.kit.trial import TrialConfigurationMixin
+from polar.models.product_price import ProductPriceAmountType, ProductPriceType
 
 from .product_price import ProductPrice
 
@@ -43,24 +48,38 @@ class ProductBillingType(StrEnum):
     recurring = "recurring"
 
 
-class Product(MetadataMixin, RecordModel):
+class Product(TrialConfigurationMixin, MetadataMixin, RecordModel):
     __tablename__ = "products"
+    __table_args__ = (
+        Index(
+            "ix_products_search_vector",
+            "search_vector",
+            postgresql_using="gin",
+        ),
+    )
+
+    search_vector: Mapped[str] = mapped_column(TSVECTOR, nullable=True)
 
     name: Mapped[str] = mapped_column(CITEXT(), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_tax_applicable: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True
-    )
     is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     recurring_interval: Mapped[SubscriptionRecurringInterval | None] = mapped_column(
-        StrEnumType(SubscriptionRecurringInterval),
+        StringEnum(SubscriptionRecurringInterval),
         nullable=True,
         index=True,
         default=None,
     )
+    recurring_interval_count: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
+    )
 
-    stripe_product_id: Mapped[str | None] = mapped_column(
-        String, nullable=True, index=True
+    is_tax_applicable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    tax_code: Mapped[TaxCode] = mapped_column(
+        StringEnum(TaxCode),
+        nullable=False,
+        default=TaxCode.general_electronically_supplied_services,
     )
 
     organization_id: Mapped[UUID] = mapped_column(
@@ -89,7 +108,8 @@ class Product(MetadataMixin, RecordModel):
             primaryjoin=(
                 "and_("
                 "ProductPrice.product_id == Product.id, "
-                "ProductPrice.is_archived.is_(False)"
+                "ProductPrice.is_archived.is_(False), "
+                "ProductPrice.source == 'catalog'"
                 ")"
             ),
             order_by="(case("
@@ -129,9 +149,6 @@ class Product(MetadataMixin, RecordModel):
         back_populates="product",
     )
 
-    def get_stripe_name(self) -> str:
-        return f"{self.organization.slug} - {self.name}"
-
     def get_price(
         self, id: UUID, *, include_archived: bool = False
     ) -> "ProductPrice | None":
@@ -153,6 +170,13 @@ class Product(MetadataMixin, RecordModel):
     @property
     def is_legacy_recurring_price(self) -> bool:
         return any(price.is_recurring for price in self.prices)
+
+    @property
+    def has_seat_based_price(self) -> bool:
+        return any(
+            price.amount_type == ProductPriceAmountType.seat_based
+            for price in self.prices
+        )
 
     @hybrid_property
     def is_recurring(self) -> bool:
@@ -190,14 +214,33 @@ class Product(MetadataMixin, RecordModel):
             else_=ProductBillingType.one_time,
         )
 
-    @property
-    def etag(self) -> str:
-        # NOTE: Could be moved to a mixin & something we can store in the DB
-        last_modified = self.modified_at
-        if not last_modified:
-            last_modified = self.created_at
 
-        h = hashlib.sha256()
-        h.update(str(last_modified).encode("utf-8"))
-        etag = h.hexdigest()
-        return etag
+products_search_vector_update_function = PGFunction(
+    schema="public",
+    signature="products_search_vector_update()",
+    definition="""
+    RETURNS trigger AS $$
+    BEGIN
+        NEW.search_vector := to_tsvector('english', coalesce(NEW.name, '') || ' ' || coalesce(NEW.description, ''));
+        RETURN NEW;
+    END
+    $$ LANGUAGE plpgsql;
+    """,
+)
+
+products_search_vector_trigger = PGTrigger(
+    schema="public",
+    signature="products_search_vector_trigger",
+    on_entity="products",
+    definition="""
+    BEFORE INSERT OR UPDATE ON products
+    FOR EACH ROW EXECUTE FUNCTION products_search_vector_update();
+    """,
+)
+
+register_entities(
+    (
+        products_search_vector_update_function,
+        products_search_vector_trigger,
+    )
+)

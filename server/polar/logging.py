@@ -1,18 +1,28 @@
 import logging.config
 import uuid
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 import structlog
 from logfire.integrations.structlog import LogfireProcessor
 
 from polar.config import settings
 
-RendererType = TypeVar("RendererType")
-
 Logger = structlog.stdlib.BoundLogger
 
 
-class Logging(Generic[RendererType]):
+def _map_critical_to_fatal(
+    logger: logging.Logger, method_name: str, event_dict: dict[str, Any]
+) -> dict[str, Any]:
+    """Map 'critical' log level to 'fatal' for logfire compatibility.
+
+    Logfire expects 'fatal' instead of Python's standard 'critical' level.
+    """
+    if event_dict.get("level") == "critical":
+        event_dict["level"] = "fatal"
+    return event_dict
+
+
+class Logging[RendererType]:
     """Hubben logging configurator of `structlog` and `logging`.
 
     Customized implementation inspired by the following documentation:
@@ -36,8 +46,7 @@ class Logging(Generic[RendererType]):
             cls.timestamper,
             structlog.processors.UnicodeDecoder(),
             structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            *([LogfireProcessor()] if logfire else []),
+            *([_map_critical_to_fatal, LogfireProcessor()] if logfire else []),
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ]
 
@@ -68,8 +77,11 @@ class Logging(Generic[RendererType]):
                             cls.timestamper,
                             structlog.processors.UnicodeDecoder(),
                             structlog.processors.StackInfoRenderer(),
-                            *([LogfireProcessor()] if logfire else []),
-                            structlog.processors.format_exc_info,
+                            *(
+                                [_map_critical_to_fatal, LogfireProcessor()]
+                                if logfire
+                                else []
+                            ),
                         ],
                     },
                 },
@@ -98,6 +110,7 @@ class Logging(Generic[RendererType]):
                             "dramatiq",
                             "authlib",
                             "logfire",
+                            "apscheduler",
                         ]
                     },
                 },

@@ -1,8 +1,10 @@
 import uuid
 
 import structlog
+from pydantic import HttpUrl
 from sqlalchemy import delete, select
 from sqlalchemy.orm import joinedload
+from sqlalchemy.orm.strategy_options import contains_eager
 
 from polar.auth.models import AuthSubject, Organization, User
 from polar.config import settings
@@ -62,17 +64,26 @@ class CustomerSessionService(ResourceServiceReader[CustomerSession]):
                 ]
             )
 
-        token, customer_session = await self.create_customer_session(session, customer)
+        token, customer_session = await self.create_customer_session(
+            session, customer, customer_create.return_url
+        )
         customer_session.raw_token = token
         return customer_session
 
     async def create_customer_session(
-        self, session: AsyncSession, customer: Customer
+        self,
+        session: AsyncSession,
+        customer: Customer,
+        return_url: HttpUrl | None = None,
     ) -> tuple[str, CustomerSession]:
         token, token_hash = generate_token_hash_pair(
             secret=settings.SECRET, prefix=CUSTOMER_SESSION_TOKEN_PREFIX
         )
-        customer_session = CustomerSession(token=token_hash, customer=customer)
+        customer_session = CustomerSession(
+            token=token_hash,
+            customer=customer,
+            return_url=str(return_url) if return_url else None,
+        )
         session.add(customer_session)
         await session.flush()
 
@@ -82,9 +93,15 @@ class CustomerSessionService(ResourceServiceReader[CustomerSession]):
         self, session: AsyncSession, token: str, *, expired: bool = False
     ) -> CustomerSession | None:
         token_hash = get_token_hash(token, secret=settings.SECRET)
-        statement = select(CustomerSession).where(
-            CustomerSession.token == token_hash,
-            CustomerSession.deleted_at.is_(None),
+        statement = (
+            select(CustomerSession)
+            .join(CustomerSession.customer)
+            .where(
+                CustomerSession.token == token_hash,
+                CustomerSession.deleted_at.is_(None),
+                Customer.can_authenticate.is_(True),
+            )
+            .options(contains_eager(CustomerSession.customer))
         )
         if not expired:
             statement = statement.where(CustomerSession.expires_at > utc_now())

@@ -1,4 +1,4 @@
-import { queryClient } from '@/utils/api/query'
+import { getQueryClient } from '@/utils/api/query'
 import { api } from '@/utils/client'
 import { schemas, unwrap } from '@polar-sh/client'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -8,6 +8,8 @@ export const useListWebhooksDeliveries = (variables: {
   webhookEndpointId: string
   limit: number
   page: number
+  start_timestamp?: Date
+  end_timestamp?: Date
 }) =>
   useQuery({
     queryKey: ['webhookDeliveries', 'list', { ...variables }],
@@ -19,6 +21,12 @@ export const useListWebhooksDeliveries = (variables: {
               endpoint_id: variables.webhookEndpointId,
               limit: variables.limit,
               page: variables.page,
+              ...(variables.start_timestamp && {
+                start_timestamp: variables.start_timestamp.toISOString(),
+              }),
+              ...(variables.end_timestamp && {
+                end_timestamp: variables.end_timestamp.toISOString(),
+              }),
             },
           },
         }),
@@ -62,7 +70,7 @@ export const useRedeliverWebhookEvent = () =>
       if (result.error) {
         return
       }
-      queryClient.invalidateQueries({
+      getQueryClient().invalidateQueries({
         queryKey: ['webhookDeliveries', 'list'],
       })
     },
@@ -89,7 +97,7 @@ export const useCreateWebhookEndpoint = () =>
       if (result.error) {
         return
       }
-      queryClient.invalidateQueries({
+      getQueryClient().invalidateQueries({
         queryKey: ['webhookEndpoints', 'list'],
       })
     },
@@ -113,12 +121,39 @@ export const useEditWebhookEndpoint = () =>
       if (result.error) {
         return
       }
+      const queryClient = getQueryClient()
       queryClient.invalidateQueries({
         queryKey: ['webhookEndpoints', 'list'],
       })
 
       queryClient.invalidateQueries({
         queryKey: ['webhookEndpoint', 'id', variables.id],
+      })
+    },
+  })
+
+export const useResetSecretWebhookEndpoint = () =>
+  useMutation({
+    mutationFn: (variables: { id: string }) =>
+      api.PATCH('/v1/webhooks/endpoints/{id}/secret', {
+        params: {
+          path: {
+            id: variables.id,
+          },
+        },
+      }),
+    onSuccess: (_result, _variables, _ctx) => {
+      const queryClient = getQueryClient()
+      queryClient.invalidateQueries({
+        queryKey: ['webhookEndpoints', 'list'],
+      })
+
+      queryClient.invalidateQueries({
+        queryKey: ['webhookEndpoint', 'id', _variables.id],
+      })
+
+      queryClient.invalidateQueries({
+        queryKey: ['webhookDeliveries', 'list'],
       })
     },
   })
@@ -134,6 +169,7 @@ export const useDeleteWebhookEndpoint = () =>
         },
       }),
     onSuccess: (_result, _variables, _ctx) => {
+      const queryClient = getQueryClient()
       queryClient.invalidateQueries({
         queryKey: ['webhookEndpoints', 'list'],
       })

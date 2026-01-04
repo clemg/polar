@@ -1,6 +1,5 @@
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -9,7 +8,11 @@ from sqlalchemy import UnaryExpression, asc, desc
 
 from polar.auth.models import AuthSubject
 from polar.config import settings
-from polar.email.renderer import get_email_renderer
+from polar.email.react import render_email_template
+from polar.email.schemas import (
+    OrganizationAccessTokenLeakedEmail,
+    OrganizationAccessTokenLeakedProps,
+)
 from polar.email.sender import enqueue_email
 from polar.enums import TokenType
 from polar.integrations.loops.service import loops as loops_service
@@ -168,28 +171,24 @@ class OrganizationAccessTokenService:
         repository = OrganizationAccessTokenRepository.from_session(session)
         await repository.soft_delete(organization_access_token)
 
-        email_renderer = get_email_renderer(
-            {"organization_access_token": "polar.organization_access_token"}
-        )
-
-        subject, body = email_renderer.render_from_template(
-            "Security Notice - Your Polar Organization Access Token has been leaked",
-            "organization_access_token/leaked_token.html",
-            {
-                "organization_access_token": organization_access_token.comment,
-                "notifier": notifier,
-                "url": url,
-                "current_year": datetime.now().year,
-            },
-        )
-
         organization_members = await user_organization_service.list_by_org(
             session, organization_access_token.organization_id
         )
         for organization_member in organization_members:
+            email = organization_member.user.email
+            body = render_email_template(
+                OrganizationAccessTokenLeakedEmail(
+                    props=OrganizationAccessTokenLeakedProps(
+                        email=email,
+                        organization_access_token=organization_access_token.comment,
+                        notifier=notifier,
+                        url=url or "",
+                    )
+                )
+            )
             enqueue_email(
-                to_email_addr=organization_member.user.email,
-                subject=subject,
+                to_email_addr=email,
+                subject="Security Notice - Your Polar Organization Access Token has been leaked",
                 html_content=body,
             )
 

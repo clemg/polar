@@ -10,9 +10,10 @@ class Scope(StrEnum):
     profile = "profile"
     email = "email"
     user_read = "user:read"
+    user_write = "user:write"
 
-    admin = "admin"  # Admin scope. For Polar staff only.
-    web_default = "web_default"  # Web default scope. For users logged in on the web.
+    web_read = "web:read"  # Read-only web access
+    web_write = "web:write"  # Write web access
 
     organizations_read = "organizations:read"
     organizations_write = "organizations:write"
@@ -56,9 +57,20 @@ class Scope(StrEnum):
     customers_read = "customers:read"
     customers_write = "customers:write"
 
+    members_read = "members:read"
+    members_write = "members:write"
+
+    wallets_read = "wallets:read"
+    wallets_write = "wallets:write"
+
+    disputes_read = "disputes:read"
+
     customer_meters_read = "customer_meters:read"
 
     customer_sessions_write = "customer_sessions:write"
+
+    customer_seats_read = "customer_seats:read"
+    customer_seats_write = "customer_seats:write"
 
     orders_read = "orders:read"
     orders_write = "orders:write"
@@ -102,14 +114,16 @@ class Scope(StrEnum):
         return json_schema
 
 
-RESERVED_SCOPES = {Scope.admin, Scope.web_default}
+RESERVED_SCOPES = {Scope.web_read, Scope.web_write}
 SCOPES_SUPPORTED = [s.value for s in Scope if s not in RESERVED_SCOPES]
 SCOPES_SUPPORTED_DISPLAY_NAMES: dict[Scope, str] = {
     Scope.openid: "OpenID",
     Scope.profile: "Read your profile",
     Scope.email: "Read your email address",
-    Scope.web_default: "Web Default",
+    Scope.web_read: "Web Read Access",
+    Scope.web_write: "Web Write Access",
     Scope.user_read: "User Read",
+    Scope.user_write: "Delete your user account",
     Scope.organizations_read: "Read your organizations",
     Scope.organizations_write: "Create or modify organizations",
     Scope.custom_fields_read: "Read custom fields",
@@ -140,8 +154,15 @@ SCOPES_SUPPORTED_DISPLAY_NAMES: dict[Scope, str] = {
     ),
     Scope.customers_read: "Read customers",
     Scope.customers_write: "Create or modify customers",
+    Scope.members_read: "Read members",
+    Scope.members_write: "Create or modify members",
+    Scope.wallets_read: "Read wallets",
+    Scope.wallets_write: "Create or modify wallets",
+    Scope.disputes_read: "Read disputes",
     Scope.customer_meters_read: "Read customer meters",
     Scope.customer_sessions_write: "Create or modify customer sessions",
+    Scope.customer_seats_read: "Read customer seats",
+    Scope.customer_seats_write: "Create or modify customer seats",
     Scope.orders_read: "Read orders made on your organizations",
     Scope.orders_write: "Modify orders made on your organizations",
     Scope.refunds_read: "Read refunds made on your organizations",

@@ -1,7 +1,5 @@
 import uuid
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from httpx import AsyncClient
@@ -13,9 +11,12 @@ from polar.models import (
     ProductPriceFixed,
     UserOrganization,
 )
+from polar.models.custom_field import CustomFieldType
 from polar.postgres import AsyncSession
 from tests.fixtures.database import SaveFixture
 from tests.fixtures.random_objects import (
+    create_custom_field,
+    create_product,
     set_product_benefits,
 )
 
@@ -158,17 +159,8 @@ class TestCreateProduct:
         client: AsyncClient,
         organization: Organization,
         user_organization: UserOrganization,
-        stripe_service_mock: MagicMock,
         session: AsyncSession,
     ) -> None:
-        create_product_mock: MagicMock = stripe_service_mock.create_product
-        create_product_mock.return_value = SimpleNamespace(id="PRODUCT_ID")
-
-        create_price_for_product_mock: MagicMock = (
-            stripe_service_mock.create_price_for_product
-        )
-        create_price_for_product_mock.return_value = SimpleNamespace(id="PRICE_ID")
-
         response = await client.post(
             "/v1/products/",
             json={
@@ -190,7 +182,7 @@ class TestCreateProduct:
     @pytest.mark.auth
     @pytest.mark.parametrize(
         "payload",
-        (
+        [
             pytest.param(
                 {
                     "recurring_interval": None,
@@ -231,6 +223,32 @@ class TestCreateProduct:
             ),
             pytest.param(
                 {
+                    "recurring_interval": "day",
+                    "prices": [
+                        {
+                            "amount_type": "fixed",
+                            "price_amount": 1000,
+                            "price_currency": "usd",
+                        }
+                    ],
+                },
+                id="Recurring daily fixed",
+            ),
+            pytest.param(
+                {
+                    "recurring_interval": "week",
+                    "prices": [
+                        {
+                            "amount_type": "fixed",
+                            "price_amount": 1000,
+                            "price_currency": "usd",
+                        }
+                    ],
+                },
+                id="Recurring weekly fixed",
+            ),
+            pytest.param(
+                {
                     "recurring_interval": "month",
                     "prices": [
                         {
@@ -240,7 +258,20 @@ class TestCreateProduct:
                         }
                     ],
                 },
-                id="Recurring fixed",
+                id="Recurring monthly fixed",
+            ),
+            pytest.param(
+                {
+                    "recurring_interval": "year",
+                    "prices": [
+                        {
+                            "amount_type": "fixed",
+                            "price_amount": 1000,
+                            "price_currency": "usd",
+                        }
+                    ],
+                },
+                id="Recurring yearly fixed",
             ),
             pytest.param(
                 {
@@ -267,7 +298,21 @@ class TestCreateProduct:
                 },
                 id="Recurring free",
             ),
-        ),
+            pytest.param(
+                {
+                    "recurring_interval": "month",
+                    "recurring_interval_count": 3,
+                    "prices": [
+                        {
+                            "amount_type": "fixed",
+                            "price_amount": 1000,
+                            "price_currency": "usd",
+                        }
+                    ],
+                },
+                id="Recurring with interval count",
+            ),
+        ],
     )
     async def test_valid(
         self,
@@ -275,16 +320,7 @@ class TestCreateProduct:
         client: AsyncClient,
         organization: Organization,
         user_organization: UserOrganization,
-        stripe_service_mock: MagicMock,
     ) -> None:
-        create_product_mock: MagicMock = stripe_service_mock.create_product
-        create_product_mock.return_value = SimpleNamespace(id="PRODUCT_ID")
-
-        create_price_for_product_mock: MagicMock = (
-            stripe_service_mock.create_price_for_product
-        )
-        create_price_for_product_mock.return_value = SimpleNamespace(id="PRICE_ID")
-
         response = await client.post(
             "/v1/products/",
             json={
@@ -372,6 +408,44 @@ class TestUpdateProduct:
         product_price = product_one_time.prices[0]
         assert isinstance(product_price, ProductPriceFixed)
         assert price["price_amount"] == product_price.price_amount
+
+    @pytest.mark.auth
+    async def test_invalid_attached_custom_fields(
+        self,
+        save_fixture: SaveFixture,
+        session: AsyncSession,
+        client: AsyncClient,
+        organization: Organization,
+        user_organization: UserOrganization,
+    ) -> None:
+        custom_field = await create_custom_field(
+            save_fixture,
+            type=CustomFieldType.text,
+            slug="test-field",
+            organization=organization,
+        )
+        product = await create_product(
+            save_fixture,
+            organization=organization,
+            recurring_interval=None,
+            attached_custom_fields=[
+                (custom_field, True),
+            ],
+        )
+
+        response = await client.patch(
+            f"/v1/products/{product.id}",
+            json={
+                "attached_custom_fields": [
+                    {
+                        "custom_field_id": str(uuid.uuid4()),
+                        "required": False,
+                    }
+                ]
+            },
+        )
+
+        assert response.status_code == 422
 
 
 @pytest.mark.asyncio

@@ -17,27 +17,24 @@ from sqlalchemy.orm import contains_eager
 
 from polar.auth.models import AuthSubject, is_organization, is_user
 from polar.custom_field.sorting import CustomFieldSortProperty
-from polar.exceptions import PolarError, PolarRequestValidationError
+from polar.exceptions import PolarRequestValidationError
 from polar.kit.pagination import PaginationParams, paginate
 from polar.kit.services import ResourceServiceReader
 from polar.kit.sorting import Sorting
 from polar.models import CustomField, Organization, User, UserOrganization
 from polar.models.custom_field import CustomFieldType
 from polar.organization.resolver import get_payload_organization
-from polar.postgres import AsyncSession
+from polar.postgres import AsyncReadSession, AsyncSession
 
 from .attachment import attached_custom_fields_models
 from .data import custom_field_data_models
 from .schemas import CustomFieldCreate, CustomFieldUpdate
 
 
-class CustomFieldError(PolarError): ...
-
-
 class CustomFieldService(ResourceServiceReader[CustomField]):
     async def list(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         *,
         organization_id: Sequence[uuid.UUID] | None = None,
@@ -87,7 +84,7 @@ class CustomFieldService(ResourceServiceReader[CustomField]):
 
     async def get_by_id(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         id: uuid.UUID,
     ) -> CustomField | None:

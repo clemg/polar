@@ -1,15 +1,17 @@
 import contextlib
 import typing
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 
 import stripe as stripe_lib
 import structlog
+from pydantic import UUID4
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import contains_eager, joinedload, selectinload
 
 from polar.auth.models import Anonymous, AuthSubject
+from polar.checkout.guard import has_product_checkout
 from polar.checkout.schemas import (
     CheckoutConfirm,
     CheckoutCreate,
@@ -25,9 +27,17 @@ from polar.customer.repository import CustomerRepository
 from polar.customer_session.service import customer_session as customer_session_service
 from polar.discount.service import DiscountNotRedeemableError
 from polar.discount.service import discount as discount_service
-from polar.enums import PaymentProcessor, SubscriptionRecurringInterval
+from polar.enums import PaymentProcessor
+from polar.event.service import event as event_service
+from polar.event.system import (
+    CheckoutCreatedMetadata,
+    SystemEvent,
+    build_checkout_event,
+)
 from polar.exceptions import (
+    BadRequest,
     NotPermitted,
+    PaymentNotReady,
     PolarError,
     PolarRequestValidationError,
     ResourceNotFound,
@@ -35,15 +45,27 @@ from polar.exceptions import (
 )
 from polar.integrations.stripe.schemas import ProductType
 from polar.integrations.stripe.service import stripe as stripe_service
-from polar.kit.address import Address
+from polar.integrations.stripe.utils import get_fingerprint
+from polar.kit.address import AddressInput
 from polar.kit.crypto import generate_token
 from polar.kit.operator import attrgetter
 from polar.kit.pagination import PaginationParams
 from polar.kit.sorting import Sorting
-from polar.kit.tax import TaxID, to_stripe_tax_id, validate_tax_id
+from polar.kit.tax import (
+    InvalidTaxID,
+    TaxCalculationError,
+    TaxCode,
+    TaxID,
+    calculate_tax,
+    to_stripe_tax_id,
+    validate_tax_id,
+)
+from polar.kit.utils import utc_now
 from polar.locker import Locker
 from polar.logging import Logger
+from polar.member import member_service
 from polar.models import (
+    Account,
     Checkout,
     CheckoutLink,
     Customer,
@@ -61,28 +83,31 @@ from polar.models import (
 from polar.models.checkout import CheckoutStatus
 from polar.models.checkout_product import CheckoutProduct
 from polar.models.discount import DiscountDuration
-from polar.models.order import OrderBillingReason
-from polar.models.product_price import ProductPriceAmountType
+from polar.models.order import OrderBillingReasonInternal
+from polar.models.product_price import ProductPriceAmountType, ProductPriceSource
 from polar.models.webhook_endpoint import WebhookEventType
 from polar.order.service import order as order_service
-from polar.organization.repository import OrganizationRepository
-from polar.postgres import AsyncSession
+from polar.organization.service import organization as organization_service
+from polar.postgres import AsyncReadSession, AsyncSession
 from polar.product.guard import (
     is_currency_price,
     is_custom_price,
     is_discount_applicable,
     is_fixed_price,
+    is_seat_price,
 )
 from polar.product.repository import ProductPriceRepository, ProductRepository
+from polar.product.schemas import ProductPriceCreateList
 from polar.product.service import product as product_service
 from polar.subscription.repository import SubscriptionRepository
 from polar.subscription.service import subscription as subscription_service
+from polar.trial_redemption.service import trial_redemption as trial_redemption_service
 from polar.webhook.service import webhook as webhook_service
 from polar.worker import enqueue_job
 
-from ..kit.tax import InvalidTaxID, TaxCalculationError, calculate_tax
 from . import ip_geolocation
 from .eventstream import CheckoutEvent, publish_checkout_event
+from .price import get_default_price
 from .repository import CheckoutRepository
 from .sorting import CheckoutSortProperty
 
@@ -141,13 +166,6 @@ class NotConfirmedCheckout(CheckoutError):
         super().__init__(message)
 
 
-class PaymentDoesNotExist(CheckoutError):
-    def __init__(self, payment_id: uuid.UUID) -> None:
-        self.payment_id = payment_id
-        message = f"Payment {payment_id} does not exist."
-        super().__init__(message)
-
-
 class ArchivedPriceCheckout(CheckoutError):
     def __init__(self, checkout: Checkout) -> None:
         self.checkout = checkout
@@ -155,14 +173,6 @@ class ArchivedPriceCheckout(CheckoutError):
         message = (
             f"Checkout {checkout.id} has an archived price: {checkout.product_price_id}"
         )
-        super().__init__(message)
-
-
-class IntentNotSucceeded(CheckoutError):
-    def __init__(self, checkout: Checkout, intent_id: str) -> None:
-        self.checkout = checkout
-        self.intent_id = intent_id
-        message = f"Intent {intent_id} for {checkout.id} is not successful."
         super().__init__(message)
 
 
@@ -176,11 +186,14 @@ class NoPaymentMethodOnIntent(CheckoutError):
         super().__init__(message)
 
 
-class PaymentRequired(CheckoutError):
+class TrialAlreadyRedeemed(CheckoutError):
     def __init__(self, checkout: Checkout) -> None:
         self.checkout = checkout
-        message = f"{checkout.id} requires a payment."
-        super().__init__(message)
+        message = (
+            "You have already used a trial for this product. "
+            "Trials can only be used once per customer."
+        )
+        super().__init__(message, 403)
 
 
 CHECKOUT_CLIENT_SECRET_PREFIX = "polar_c_"
@@ -189,7 +202,7 @@ CHECKOUT_CLIENT_SECRET_PREFIX = "polar_c_"
 class CheckoutService:
     async def list(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         *,
         organization_id: Sequence[uuid.UUID] | None = None,
@@ -208,7 +221,7 @@ class CheckoutService:
         )
 
         if organization_id is not None:
-            statement = statement.where(Product.organization_id.in_(organization_id))
+            statement = statement.where(Checkout.organization_id.in_(organization_id))
 
         if product_id is not None:
             statement = statement.where(Checkout.product_id.in_(product_id))
@@ -230,7 +243,7 @@ class CheckoutService:
 
     async def get_by_id(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         id: uuid.UUID,
     ) -> Checkout | None:
@@ -245,7 +258,7 @@ class CheckoutService:
         if checkout is None:
             return None
 
-        if checkout.product.organization.is_blocked():
+        if checkout.organization.is_blocked():
             raise NotPermitted()
 
         return checkout
@@ -257,6 +270,7 @@ class CheckoutService:
         auth_subject: AuthSubject[User | Organization],
         ip_geolocation_client: ip_geolocation.IPGeolocationClient | None = None,
     ) -> Checkout:
+        ad_hoc_prices: dict[Product, Sequence[ProductPrice]] = {}
         if isinstance(checkout_create, CheckoutPriceCreate):
             products, product, price = await self._get_validated_price(
                 session, auth_subject, checkout_create.product_price_id
@@ -269,49 +283,31 @@ class CheckoutService:
             products = await self._get_validated_products(
                 session, auth_subject, checkout_create.products
             )
+            if checkout_create.prices:
+                ad_hoc_prices = await self._get_validated_prices(
+                    session, auth_subject, products, checkout_create.prices
+                )
+
             product = products[0]
-            # Select the static price in priority, as it determines the amount and specific behavior, like PWYW
-            price = product.get_static_price() or product.prices[0]
+            try:
+                price = get_default_price(ad_hoc_prices[product])
+            except KeyError:
+                price = get_default_price(product.prices)
 
         if product.organization.is_blocked():
             raise NotPermitted()
 
         if checkout_create.amount is not None and is_custom_price(price):
-            if (
-                price.minimum_amount is not None
-                and checkout_create.amount < price.minimum_amount
-            ):
-                raise PolarRequestValidationError(
-                    [
-                        {
-                            "type": "greater_than_equal",
-                            "loc": ("body", "amount"),
-                            "msg": "Amount is below minimum.",
-                            "input": checkout_create.amount,
-                            "ctx": {"ge": price.minimum_amount},
-                        }
-                    ]
-                )
-            elif (
-                price.maximum_amount is not None
-                and checkout_create.amount > price.maximum_amount
-            ):
-                raise PolarRequestValidationError(
-                    [
-                        {
-                            "type": "less_than_equal",
-                            "loc": ("body", "amount"),
-                            "msg": "Amount is above maximum.",
-                            "input": checkout_create.amount,
-                            "ctx": {"le": price.maximum_amount},
-                        }
-                    ]
-                )
+            self._validate_custom_price_amount(price, checkout_create.amount)
 
         discount: Discount | None = None
         if checkout_create.discount_id is not None:
             discount = await self._get_validated_discount(
-                session, product, price, discount_id=checkout_create.discount_id
+                session,
+                product.organization,
+                product,
+                price,
+                discount_id=checkout_create.discount_id,
             )
 
         customer_tax_id: TaxID | None = None
@@ -343,6 +339,31 @@ class CheckoutService:
                         }
                     ]
                 ) from e
+
+        # Validate seats for seat-based pricing
+        if is_seat_price(price):
+            if checkout_create.seats is None or checkout_create.seats < 1:
+                raise PolarRequestValidationError(
+                    [
+                        {
+                            "type": "missing",
+                            "loc": ("body", "seats"),
+                            "msg": "Seats is required for seat-based pricing.",
+                            "input": checkout_create.seats,
+                        }
+                    ]
+                )
+        elif checkout_create.seats is not None:
+            raise PolarRequestValidationError(
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("body", "seats"),
+                        "msg": "Seats can only be set for seat-based pricing.",
+                        "input": checkout_create.seats,
+                    }
+                ]
+            )
 
         product = await self._eager_load_product(session, product)
 
@@ -383,7 +404,16 @@ class CheckoutService:
         elif is_custom_price(price):
             currency = price.price_currency
             if amount is None:
-                amount = price.preset_amount or settings.CUSTOM_PRICE_PRESET_FALLBACK
+                amount = (
+                    price.preset_amount
+                    or price.minimum_amount
+                    or settings.CUSTOM_PRICE_PRESET_FALLBACK
+                )
+        elif is_seat_price(price):
+            # Calculate amount based on seat count
+            seats = checkout_create.seats or 1
+            amount = price.calculate_amount(seats)
+            currency = price.price_currency
         else:
             amount = 0
             currency = price.price_currency if is_currency_price(price) else "usd"
@@ -395,7 +425,7 @@ class CheckoutService:
         )
 
         checkout_products = [
-            CheckoutProduct(product=product, order=i)
+            CheckoutProduct(product=product, order=i, ad_hoc_prices=[])
             for i, product in enumerate(products)
         ]
 
@@ -415,6 +445,7 @@ class CheckoutService:
             client_secret=generate_token(prefix=CHECKOUT_CLIENT_SECRET_PREFIX),
             amount=amount,
             currency=currency,
+            organization=product.organization,
             checkout_products=checkout_products,
             product=product,
             product_price=price,
@@ -430,6 +461,7 @@ class CheckoutService:
                     "product_price_id",
                     "product_id",
                     "products",
+                    "prices",
                     "amount",
                     "require_billing_address",
                     "customer_billing_address",
@@ -445,6 +477,7 @@ class CheckoutService:
             prefill_attributes = (
                 "email",
                 "name",
+                "billing_name",
                 "billing_address",
                 "tax_id",
             )
@@ -456,6 +489,17 @@ class CheckoutService:
                         checkout_attribute,
                         getattr(checkout.customer, attribute),
                     )
+
+            # Auto-select business customer if they have both a billing name (without the fallback to customer.name)
+            # and a billing address since that means they've previously checked the is_business_customer checkbox
+            # Only auto-select if is_business_customer wasn't explicitly set in the request
+            if (
+                "is_business_customer" not in checkout_create.model_fields_set
+                and checkout.customer.actual_billing_name is not None
+                and checkout.customer.billing_address is not None
+                and checkout.customer.billing_address.has_address()
+            ):
+                checkout.is_business_customer = True
 
         if checkout.payment_processor == PaymentProcessor.stripe:
             checkout.payment_processor_metadata = {
@@ -476,6 +520,7 @@ class CheckoutService:
         checkout = await self._update_checkout_ip_geolocation(
             session, checkout, ip_geolocation_client
         )
+        checkout = await self._update_trial_end(checkout)
 
         try:
             checkout = await self._update_checkout_tax(session, checkout)
@@ -484,6 +529,15 @@ class CheckoutService:
             pass
 
         await session.flush()
+
+        if ad_hoc_prices:
+            for checkout_product in checkout.checkout_products:
+                checkout_product.ad_hoc_prices = ad_hoc_prices.get(
+                    checkout_product.product, []
+                )
+                session.add(checkout_product)
+            await session.flush()
+
         await self._after_checkout_created(session, checkout)
 
         return checkout
@@ -497,7 +551,9 @@ class CheckoutService:
         ip_address: str | None = None,
     ) -> Checkout:
         product_repository = ProductRepository.from_session(session)
-        product = await product_repository.get_by_id(checkout_create.product_id)
+        product = await product_repository.get_by_id(
+            checkout_create.product_id, options=product_repository.get_eager_options()
+        )
 
         if product is None:
             raise PolarRequestValidationError(
@@ -523,8 +579,6 @@ class CheckoutService:
                 ]
             )
 
-        product = await self._eager_load_product(session, product)
-
         if product.organization.blocked_at is not None:
             raise PolarRequestValidationError(
                 [
@@ -537,7 +591,33 @@ class CheckoutService:
                 ]
             )
 
-        price = product.prices[0]
+        # Select the static price in priority, as it determines the amount and specific behavior
+        price = product.get_static_price() or product.prices[0]
+
+        # Validate seats for seat-based pricing
+        if is_seat_price(price):
+            if checkout_create.seats is None or checkout_create.seats < 1:
+                raise PolarRequestValidationError(
+                    [
+                        {
+                            "type": "missing",
+                            "loc": ("body", "seats"),
+                            "msg": "Seats is required for seat-based pricing.",
+                            "input": checkout_create.seats,
+                        }
+                    ]
+                )
+        elif checkout_create.seats is not None:
+            raise PolarRequestValidationError(
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("body", "seats"),
+                        "msg": "Seats can only be set for seat-based pricing.",
+                        "input": checkout_create.seats,
+                    }
+                ]
+            )
 
         amount = 0
         currency = "usd"
@@ -546,7 +626,16 @@ class CheckoutService:
             currency = price.price_currency
         elif is_custom_price(price):
             currency = price.price_currency
-            amount = price.preset_amount or settings.CUSTOM_PRICE_PRESET_FALLBACK
+            amount = (
+                price.preset_amount
+                or price.minimum_amount
+                or settings.CUSTOM_PRICE_PRESET_FALLBACK
+            )
+        elif is_seat_price(price):
+            # Calculate amount based on seat count
+            seats = checkout_create.seats or 1
+            amount = price.calculate_amount(seats)
+            currency = price.price_currency
         elif is_currency_price(price):
             currency = price.price_currency
 
@@ -555,9 +644,15 @@ class CheckoutService:
             client_secret=generate_token(prefix=CHECKOUT_CLIENT_SECRET_PREFIX),
             amount=amount,
             currency=currency,
-            checkout_products=[CheckoutProduct(product=product, order=0)],
+            seats=checkout_create.seats,
+            allow_trial=True,
+            organization=product.organization,
+            checkout_products=[
+                CheckoutProduct(product=product, order=0, ad_hoc_prices=[])
+            ],
             product=product,
             product_price=price,
+            discount=None,
             customer=None,
             subscription=None,
             customer_email=checkout_create.customer_email,
@@ -581,6 +676,7 @@ class CheckoutService:
         checkout = await self._update_checkout_ip_geolocation(
             session, checkout, ip_geolocation_client
         )
+        checkout = await self._update_trial_end(checkout)
 
         try:
             checkout = await self._update_checkout_tax(session, checkout)
@@ -602,6 +698,7 @@ class CheckoutService:
         embed_origin: str | None = None,
         ip_geolocation_client: ip_geolocation.IPGeolocationClient | None = None,
         ip_address: str | None = None,
+        query_prefill: dict[str, str | UUID4 | dict[str, str] | None] | None = None,
         **query_metadata: str | None,
     ) -> Checkout:
         products: list[Product] = []
@@ -621,17 +718,52 @@ class CheckoutService:
                 ]
             )
 
+        # Pre-select product if product_id is provided and matches a configured product
         product = products[0]
-        price = product.prices[0]
+        query_product_id = query_prefill.get("product_id") if query_prefill else None
+        product_id = (
+            query_product_id if isinstance(query_product_id, uuid.UUID) else None
+        )
+
+        if product_id is not None:
+            for p in products:
+                if p.id == product_id:
+                    product = p
+                    break
+        # Select the static price in priority, as it determines the amount and specific behavior
+        price = product.get_static_price() or product.prices[0]
 
         amount = 0
         currency = "usd"
+        seats = None
         if is_fixed_price(price):
             amount = price.price_amount
             currency = price.price_currency
         elif is_custom_price(price):
             currency = price.price_currency
-            amount = price.preset_amount or settings.CUSTOM_PRICE_PRESET_FALLBACK
+            query_amount_str = query_prefill.get("amount") if query_prefill else None
+
+            # Try to parse and validate query amount
+            valid_query_amount = None
+            if query_amount_str is not None and isinstance(query_amount_str, str):
+                try:
+                    query_amount_int = int(float(query_amount_str))
+                    self._validate_custom_price_amount(price, query_amount_int)
+                    valid_query_amount = query_amount_int
+                except (ValueError, TypeError, PolarRequestValidationError):
+                    pass
+
+            amount = (
+                valid_query_amount
+                or price.preset_amount
+                or price.minimum_amount
+                or settings.CUSTOM_PRICE_PRESET_FALLBACK
+            )
+        elif is_seat_price(price):
+            # Default to 1 seat for checkout links with seat-based pricing
+            seats = 1
+            amount = price.calculate_amount(seats)
+            currency = price.price_currency
         elif is_currency_price(price):
             currency = price.price_currency
 
@@ -639,7 +771,11 @@ class CheckoutService:
         if checkout_link.discount_id is not None:
             try:
                 discount = await self._get_validated_discount(
-                    session, product, price, discount_id=checkout_link.discount_id
+                    session,
+                    product.organization,
+                    product,
+                    price,
+                    discount_id=checkout_link.discount_id,
                 )
             # If the discount is not valid, just ignore it
             except PolarRequestValidationError:
@@ -649,10 +785,16 @@ class CheckoutService:
             client_secret=generate_token(prefix=CHECKOUT_CLIENT_SECRET_PREFIX),
             amount=amount,
             currency=currency,
+            seats=seats,
+            trial_interval=checkout_link.trial_interval,
+            trial_interval_count=checkout_link.trial_interval_count,
             allow_discount_codes=checkout_link.allow_discount_codes,
+            allow_trial=True,
             require_billing_address=checkout_link.require_billing_address,
+            organization=checkout_link.organization,
             checkout_products=[
-                CheckoutProduct(product=p, order=i) for i, p in enumerate(products)
+                CheckoutProduct(product=p, order=i, ad_hoc_prices=[])
+                for i, p in enumerate(products)
             ],
             product=product,
             product_price=price,
@@ -663,6 +805,59 @@ class CheckoutService:
             success_url=checkout_link.success_url,
             user_metadata=checkout_link.user_metadata,
         )
+
+        # Handle query parameter prefill
+        if query_prefill:
+            customer_email = query_prefill.get("customer_email")
+            if customer_email is not None and isinstance(customer_email, str):
+                checkout.customer_email = customer_email
+
+            customer_name = query_prefill.get("customer_name")
+            if customer_name is not None and isinstance(customer_name, str):
+                checkout.customer_name = customer_name
+
+            discount_code = query_prefill.get("discount_code")
+            if discount_code is not None and isinstance(discount_code, str):
+                try:
+                    discount = await self._get_validated_discount(
+                        session,
+                        product.organization,
+                        product,
+                        price,
+                        discount_code=discount_code,
+                    )
+                    checkout.discount = discount
+                except PolarRequestValidationError:
+                    pass
+
+            custom_field_data_value = query_prefill.get("custom_field_data")
+            if custom_field_data_value is not None and isinstance(
+                custom_field_data_value, dict
+            ):
+                valid_slugs = {
+                    cf.custom_field.slug for cf in product.attached_custom_fields
+                }
+
+                filtered_data = {
+                    slug: value
+                    for slug, value in custom_field_data_value.items()
+                    if slug in valid_slugs
+                }
+
+                if filtered_data:
+                    try:
+                        validated_data = validate_custom_field_data(
+                            product.attached_custom_fields,
+                            filtered_data,
+                            validate_required=False,
+                        )
+                        checkout.custom_field_data = {
+                            **(checkout.custom_field_data or {}),
+                            **validated_data,
+                        }
+                    except PolarRequestValidationError:
+                        # If validation fails, just ignore the custom field data
+                        pass
 
         for key, value in query_metadata.items():
             if value is not None and key not in checkout.user_metadata:
@@ -682,6 +877,7 @@ class CheckoutService:
         checkout = await self._update_checkout_ip_geolocation(
             session, checkout, ip_geolocation_client
         )
+        checkout = await self._update_trial_end(checkout)
 
         try:
             checkout = await self._update_checkout_tax(session, checkout)
@@ -772,7 +968,7 @@ class CheckoutService:
             )
 
         # Case where the price was archived after the checkout was created
-        if checkout.product_price.is_archived:
+        if has_product_checkout(checkout) and checkout.product_price.is_archived:
             errors.append(
                 {
                     "type": "value_error",
@@ -781,6 +977,15 @@ class CheckoutService:
                     "input": checkout.product_price_id,
                 }
             )
+
+        # Check if organization can accept payments (only block paid transactions)
+        if (
+            checkout.is_payment_required
+            and not await organization_service.is_organization_ready_for_payment(
+                session, checkout.organization
+            )
+        ):
+            raise PaymentNotReady()
 
         required_fields = self._get_required_confirm_fields(checkout)
         for required_field in required_fields:
@@ -827,81 +1032,115 @@ class CheckoutService:
         if len(errors) > 0:
             raise PolarRequestValidationError(errors)
 
-        if checkout.payment_processor == PaymentProcessor.stripe:
-            customer = await self._create_or_update_customer(
-                session, auth_subject, checkout
+        if (
+            checkout.trial_end is not None
+            and not checkout.organization.subscriptions_billing_engine
+        ):
+            raise BadRequest(
+                "Trials are not supported on susbcriptions managed by Stripe."
             )
 
-            checkout.customer = customer
-            stripe_customer_id = customer.stripe_customer_id
-            assert stripe_customer_id is not None
-            checkout.payment_processor_metadata = {
-                **checkout.payment_processor_metadata,
-                "customer_id": stripe_customer_id,
-            }
-
-            if checkout.is_payment_form_required:
-                assert checkout_confirm.confirmation_token_id is not None
-                assert checkout.customer_billing_address is not None
-                intent_metadata: dict[str, str] = {
-                    "checkout_id": str(checkout.id),
-                    "type": ProductType.product,
-                    "tax_amount": str(checkout.tax_amount),
-                    "tax_country": checkout.customer_billing_address.country,
+        if checkout.payment_processor == PaymentProcessor.stripe:
+            async with self._create_or_update_customer(
+                session, auth_subject, checkout
+            ) as customer:
+                checkout.customer = customer
+                stripe_customer_id = customer.stripe_customer_id
+                assert stripe_customer_id is not None
+                checkout.payment_processor_metadata = {
+                    **checkout.payment_processor_metadata,
+                    "customer_id": stripe_customer_id,
                 }
-                if (
-                    state := checkout.customer_billing_address.get_unprefixed_state()
-                ) is not None:
-                    intent_metadata["tax_state"] = state
 
-                intent: stripe_lib.PaymentIntent | stripe_lib.SetupIntent
-                try:
-                    if checkout.is_payment_required:
-                        payment_intent_params: stripe_lib.PaymentIntent.CreateParams = {
-                            "amount": checkout.total_amount,
-                            "currency": checkout.currency,
-                            "automatic_payment_methods": {"enabled": True},
-                            "confirm": True,
-                            "confirmation_token": checkout_confirm.confirmation_token_id,
-                            "customer": stripe_customer_id,
-                            "statement_descriptor_suffix": checkout.organization.statement_descriptor,
-                            "description": f"{checkout.organization.name} — {checkout.product.name}",
-                            "metadata": intent_metadata,
-                            "return_url": settings.generate_frontend_url(
-                                f"/checkout/{checkout.client_secret}/confirmation"
-                            ),
-                        }
-                        if checkout.product.is_recurring:
-                            payment_intent_params["setup_future_usage"] = "off_session"
-                        intent = await stripe_service.create_payment_intent(
-                            **payment_intent_params
-                        )
-                    else:
-                        setup_intent_params: stripe_lib.SetupIntent.CreateParams = {
-                            "automatic_payment_methods": {"enabled": True},
-                            "confirm": True,
-                            "confirmation_token": checkout_confirm.confirmation_token_id,
-                            "customer": stripe_customer_id,
-                            "description": f"{checkout.organization.name} — {checkout.product.name}",
-                            "metadata": intent_metadata,
-                            "return_url": settings.generate_frontend_url(
-                                f"/checkout/{checkout.client_secret}/confirmation"
-                            ),
-                        }
-                        intent = await stripe_service.create_setup_intent(
-                            **setup_intent_params
-                        )
-                except stripe_lib.StripeError as e:
-                    error = e.error
-                    error_type = error.type if error is not None else None
-                    error_message = error.message if error is not None else None
-                    raise PaymentError(checkout, error_type, error_message)
-                else:
-                    checkout.payment_processor_metadata = {
-                        **checkout.payment_processor_metadata,
-                        "intent_client_secret": intent.client_secret,
-                        "intent_status": intent.status,
+                intent: stripe_lib.PaymentIntent | stripe_lib.SetupIntent | None = None
+                if checkout.is_payment_form_required:
+                    assert checkout_confirm.confirmation_token_id is not None
+                    assert checkout.customer_billing_address is not None
+                    intent_metadata: dict[str, str] = {
+                        "checkout_id": str(checkout.id),
+                        "type": ProductType.product,
+                        "tax_amount": str(checkout.tax_amount),
+                        "tax_country": checkout.customer_billing_address.country,
                     }
+                    if (
+                        state
+                        := checkout.customer_billing_address.get_unprefixed_state()
+                    ) is not None:
+                        intent_metadata["tax_state"] = state
+
+                    try:
+                        if checkout.is_payment_required:
+                            payment_intent_params: stripe_lib.PaymentIntent.CreateParams = {
+                                "amount": checkout.total_amount,
+                                "currency": checkout.currency,
+                                "automatic_payment_methods": {"enabled": True},
+                                "confirm": True,
+                                "confirmation_token": checkout_confirm.confirmation_token_id,
+                                "customer": stripe_customer_id,
+                                "statement_descriptor_suffix": checkout.organization.statement_descriptor(),
+                                "description": checkout.description,
+                                "metadata": intent_metadata,
+                                "return_url": settings.generate_frontend_url(
+                                    f"/checkout/{checkout.client_secret}/confirmation"
+                                ),
+                                "expand": ["payment_method"],
+                            }
+                            if checkout.should_save_payment_method:
+                                payment_intent_params["setup_future_usage"] = (
+                                    "off_session"
+                                )
+                            intent = await stripe_service.create_payment_intent(
+                                **payment_intent_params
+                            )
+                        else:
+                            setup_intent_params: stripe_lib.SetupIntent.CreateParams = {
+                                "automatic_payment_methods": {"enabled": True},
+                                "confirm": True,
+                                "confirmation_token": checkout_confirm.confirmation_token_id,
+                                "customer": stripe_customer_id,
+                                "description": checkout.description,
+                                "metadata": intent_metadata,
+                                "return_url": settings.generate_frontend_url(
+                                    f"/checkout/{checkout.client_secret}/confirmation"
+                                ),
+                                "expand": ["payment_method"],
+                            }
+                            intent = await stripe_service.create_setup_intent(
+                                **setup_intent_params
+                            )
+                    except stripe_lib.StripeError as e:
+                        error = e.error
+                        error_type = error.type if error is not None else None
+                        error_message = error.message if error is not None else None
+                        raise PaymentError(checkout, error_type, error_message) from e
+                    else:
+                        checkout.payment_processor_metadata = {
+                            **checkout.payment_processor_metadata,
+                            "intent_client_secret": intent.client_secret,
+                            "intent_status": intent.status,
+                        }
+
+                # Check for trial abuse
+                if (
+                    checkout.trial_end is not None
+                    and checkout.organization.prevent_trial_abuse
+                ):
+                    trial_already_redeemed = (
+                        await trial_redemption_service.check_trial_already_redeemed(
+                            session,
+                            checkout.organization,
+                            customer=customer,
+                            payment_method_fingerprint=get_fingerprint(
+                                typing.cast(
+                                    stripe_lib.PaymentMethod, intent.payment_method
+                                )
+                            )
+                            if (intent and intent.payment_method)
+                            else None,
+                        )
+                    )
+                    if trial_already_redeemed:
+                        raise TrialAlreadyRedeemed(checkout)
 
         if not checkout.is_payment_form_required:
             enqueue_job("checkout.handle_free_success", checkout_id=checkout.id)
@@ -932,6 +1171,9 @@ class CheckoutService:
         if checkout.status != CheckoutStatus.confirmed:
             raise NotConfirmedCheckout(checkout)
 
+        if not has_product_checkout(checkout):
+            raise NotImplementedError()
+
         product_price = checkout.product_price
         if product_price.is_archived:
             raise ArchivedPriceCheckout(checkout)
@@ -939,32 +1181,36 @@ class CheckoutService:
         product = checkout.product
         subscription: Subscription | None = None
         if product.is_recurring:
-            if not product.organization.subscriptions_billing_engine:
-                (
-                    subscription,
-                    _,
-                ) = await subscription_service.create_or_update_from_checkout_stripe(
-                    session, checkout, payment, payment_method
-                )
-            else:
-                (
-                    subscription,
-                    created,
-                ) = await subscription_service.create_or_update_from_checkout(
-                    session, checkout, payment_method
-                )
-                await order_service.create_from_checkout_subscription(
-                    session,
-                    checkout,
-                    subscription,
-                    OrderBillingReason.subscription_create
-                    if created
-                    else OrderBillingReason.subscription_update,
-                    payment,
-                )
+            (
+                subscription,
+                created,
+            ) = await subscription_service.create_or_update_from_checkout(
+                session, checkout, payment_method
+            )
+            await order_service.create_from_checkout_subscription(
+                session,
+                checkout,
+                subscription,
+                OrderBillingReasonInternal.subscription_create
+                if created
+                else OrderBillingReasonInternal.subscription_update,
+                payment,
+            )
         else:
             await order_service.create_from_checkout_one_time(
                 session, checkout, payment
+            )
+
+        # Create trial redemption record if this checkout had a trial period
+        if checkout.trial_end is not None:
+            assert checkout.customer is not None
+            await trial_redemption_service.create_trial_redemption(
+                session,
+                customer=checkout.customer,
+                product=product,
+                payment_method_fingerprint=payment_method.fingerprint
+                if payment_method
+                else None,
             )
 
         repository = CheckoutRepository.from_session(session)
@@ -1038,7 +1284,9 @@ class CheckoutService:
             auth_subject,
             options=(
                 contains_eager(ProductPrice.product).options(
-                    joinedload(Product.organization),
+                    joinedload(Product.organization)
+                    .joinedload(Organization.account)
+                    .joinedload(Account.admin),
                     selectinload(Product.prices),
                 ),
             ),
@@ -1172,10 +1420,60 @@ class CheckoutService:
 
         return products
 
+    async def _get_validated_prices(
+        self,
+        session: AsyncSession,
+        auth_subject: AuthSubject[User | Organization],
+        products: Sequence[Product],
+        prices: dict[uuid.UUID, ProductPriceCreateList],
+    ) -> dict[Product, Sequence[ProductPrice]]:
+        validated_prices: dict[Product, Sequence[ProductPrice]] = {}
+        errors: list[ValidationError] = []
+        for product_id, product_prices in prices.items():
+            try:
+                product = next(p for p in products if p.id == product_id)
+            except StopIteration:
+                errors.append(
+                    {
+                        "type": "value_error",
+                        "loc": ("body", "prices", str(product_id)),
+                        "msg": "Product is not set on that checkout.",
+                        "input": product_id,
+                    }
+                )
+                continue
+
+            (
+                validated_product_prices,
+                _,
+                _,
+                price_errors,
+            ) = await product_service.get_validated_prices(
+                session,
+                product_prices,
+                product.recurring_interval,
+                product,
+                auth_subject,
+                source=ProductPriceSource.ad_hoc,
+                error_prefix=(
+                    "body",
+                    "prices",
+                    str(product_id),
+                ),
+            )
+            errors = [*errors, *price_errors]
+            validated_prices[product] = validated_product_prices
+
+        if len(errors) > 0:
+            raise PolarRequestValidationError(errors)
+
+        return validated_prices
+
     @typing.overload
     async def _get_validated_discount(
         self,
         session: AsyncSession,
+        organization: Organization,
         product: Product,
         price: ProductPrice,
         *,
@@ -1186,6 +1484,7 @@ class CheckoutService:
     async def _get_validated_discount(
         self,
         session: AsyncSession,
+        organization: Organization,
         product: Product,
         price: ProductPrice,
         *,
@@ -1195,6 +1494,7 @@ class CheckoutService:
     async def _get_validated_discount(
         self,
         session: AsyncSession,
+        organization: Organization,
         product: Product,
         price: ProductPrice,
         *,
@@ -1218,11 +1518,11 @@ class CheckoutService:
         discount: Discount | None = None
         if discount_id is not None:
             discount = await discount_service.get_by_id_and_organization(
-                session, discount_id, product.organization, products=[product]
+                session, discount_id, organization, products=[product]
             )
         elif discount_code is not None:
             discount = await discount_service.get_by_code_and_product(
-                session, discount_code, product
+                session, discount_code, organization, product
             )
 
         if discount is None:
@@ -1313,9 +1613,21 @@ class CheckoutService:
         async with locker.lock(
             f"checkout:{checkout.id}", timeout=10, blocking_timeout=10
         ):
-            # Refresh the checkout status: it may have been confirmed while waiting for the lock
-            await session.refresh(checkout, {"status"})
+            # Refresh the checkout: it may have changed while waiting for the lock
+            repository = CheckoutRepository.from_session(session)
+            checkout = typing.cast(
+                Checkout,
+                await repository.get_by_id(
+                    checkout.id, options=repository.get_eager_options()
+                ),
+            )
             yield checkout
+
+            # 🚨 It's not a mistake: we do explicitly commit here before releasing the lock.
+            # The goal is to avoid race conditions where waiting updates take the lock and refresh
+            # the Checkout object _before_ the previous operation had the chance to commit
+            # See: https://github.com/polarsource/polar/issues/7260
+            await session.commit()
 
     async def _update_checkout(
         self,
@@ -1362,8 +1674,13 @@ class CheckoutService:
             checkout.product = product
 
             if checkout_update.product_price_id is not None:
-                price = product.get_price(checkout_update.product_price_id)
-                if price is None:
+                try:
+                    price = next(
+                        p
+                        for p in checkout.prices[product.id]
+                        if p.id == checkout_update.product_price_id
+                    )
+                except StopIteration as e:
                     raise PolarRequestValidationError(
                         [
                             {
@@ -1373,9 +1690,9 @@ class CheckoutService:
                                 "input": checkout_update.product_price_id,
                             }
                         ]
-                    )
+                    ) from e
             else:
-                price = product.prices[0]
+                price = get_default_price(checkout.prices[product.id])
 
             checkout.product_price = price
             checkout.amount = 0
@@ -1383,59 +1700,73 @@ class CheckoutService:
             if is_fixed_price(price):
                 checkout.amount = price.price_amount
                 checkout.currency = price.price_currency
+                checkout.seats = None
             elif is_custom_price(price):
                 checkout.amount = (
-                    price.preset_amount or settings.CUSTOM_PRICE_PRESET_FALLBACK
+                    price.preset_amount
+                    or price.minimum_amount
+                    or settings.CUSTOM_PRICE_PRESET_FALLBACK
                 )
+                checkout.currency = price.price_currency
+                checkout.seats = None
+            elif is_seat_price(price):
+                seats = checkout.seats or checkout_update.seats or 1
+                checkout.seats = seats
+                checkout.amount = price.calculate_amount(seats)
                 checkout.currency = price.price_currency
             elif is_currency_price(price):
                 checkout.currency = price.price_currency
+                checkout.seats = None
 
             # When changing product, remove the discount if it's not applicable
-            if checkout.discount is not None and not checkout.discount.is_applicable(
-                checkout.product
+            if (
+                has_product_checkout(checkout)
+                and checkout.discount is not None
+                and not checkout.discount.is_applicable(checkout.product)
             ):
                 checkout.discount = None
 
-        price = checkout.product_price
-        if checkout_update.amount is not None and is_custom_price(price):
-            if (
-                price.minimum_amount is not None
-                and checkout_update.amount < price.minimum_amount
-            ):
-                raise PolarRequestValidationError(
-                    [
-                        {
-                            "type": "greater_than_equal",
-                            "loc": ("body", "amount"),
-                            "msg": "Amount is below minimum.",
-                            "input": checkout_update.amount,
-                            "ctx": {"ge": price.minimum_amount},
-                        }
-                    ]
-                )
-            elif (
-                price.maximum_amount is not None
-                and checkout_update.amount > price.maximum_amount
-            ):
-                raise PolarRequestValidationError(
-                    [
-                        {
-                            "type": "less_than_equal",
-                            "loc": ("body", "amount"),
-                            "msg": "Amount is above maximum.",
-                            "input": checkout_update.amount,
-                            "ctx": {"le": price.maximum_amount},
-                        }
-                    ]
-                )
-
+        if (
+            has_product_checkout(checkout)
+            and checkout_update.amount is not None
+            and is_custom_price(checkout.product_price)
+        ):
+            self._validate_custom_price_amount(
+                checkout.product_price, checkout_update.amount
+            )
             checkout.amount = checkout_update.amount
 
+        # Handle seat updates for seat-based pricing
+        if (
+            has_product_checkout(checkout)
+            and checkout_update.seats is not None
+            and is_seat_price(checkout.product_price)
+        ):
+            checkout.seats = checkout_update.seats
+            checkout.amount = checkout.product_price.calculate_amount(
+                checkout_update.seats
+            )
+        elif checkout_update.seats is not None:
+            # Seats provided for non-seat-based pricing
+            raise PolarRequestValidationError(
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("body", "seats"),
+                        "msg": "Seats can only be set for seat-based pricing.",
+                        "input": checkout_update.seats,
+                    }
+                ]
+            )
+
         if isinstance(checkout_update, CheckoutUpdate):
-            if checkout_update.discount_id is not None:
+            if (
+                has_product_checkout(checkout)
+                and checkout_update.discount_id is not None
+            ):
                 checkout.discount = await self._get_validated_discount(
                     session,
+                    checkout.organization,
                     checkout.product,
                     checkout.product_price,
                     discount_id=checkout_update.discount_id,
@@ -1447,9 +1778,13 @@ class CheckoutService:
             isinstance(checkout_update, CheckoutUpdatePublic)
             and checkout.allow_discount_codes
         ):
-            if checkout_update.discount_code is not None:
+            if (
+                has_product_checkout(checkout)
+                and checkout_update.discount_code is not None
+            ):
                 discount = await self._get_validated_discount(
                     session,
+                    checkout.organization,
                     checkout.product,
                     checkout.product_price,
                     discount_code=checkout_update.discount_code,
@@ -1503,7 +1838,10 @@ class CheckoutService:
                         ]
                     ) from e
 
-        if checkout_update.custom_field_data is not None:
+        if (
+            has_product_checkout(checkout)
+            and checkout_update.custom_field_data is not None
+        ):
             custom_field_data = validate_custom_field_data(
                 checkout.product.attached_custom_fields,
                 checkout_update.custom_field_data,
@@ -1532,6 +1870,8 @@ class CheckoutService:
         ).items():
             setattr(checkout, attr, value)
 
+        checkout = await self._update_trial_end(checkout)
+
         session.add(checkout)
 
         await self._validate_subscription_uniqueness(session, checkout)
@@ -1541,27 +1881,31 @@ class CheckoutService:
     async def _update_checkout_tax(
         self, session: AsyncSession, checkout: Checkout
     ) -> Checkout:
-        if not (checkout.is_payment_required and checkout.product.is_tax_applicable):
+        is_tax_applicable = True
+        tax_code = TaxCode.general_electronically_supplied_services
+        if has_product_checkout(checkout):
+            is_tax_applicable = checkout.product.is_tax_applicable
+            tax_code = checkout.product.tax_code
+
+        if not (checkout.is_payment_form_required and is_tax_applicable):
             checkout.tax_amount = 0
             checkout.tax_processor_id = None
             return checkout
 
-        if (
-            checkout.customer_billing_address is not None
-            and checkout.product.stripe_product_id is not None
-        ):
+        if checkout.customer_billing_address is not None:
             try:
                 tax_calculation = await calculate_tax(
                     checkout.id,
                     checkout.currency,
                     checkout.net_amount,
-                    checkout.product.stripe_product_id,
+                    tax_code,
                     checkout.customer_billing_address,
                     (
                         [checkout.customer_tax_id]
                         if checkout.customer_tax_id is not None
                         else []
                     ),
+                    customer_exempt=False,
                 )
                 checkout.tax_amount = tax_calculation["amount"]
                 checkout.tax_processor_id = tax_calculation["processor_id"]
@@ -1596,7 +1940,7 @@ class CheckoutService:
             return checkout
 
         try:
-            address = Address.model_validate({"country": country})
+            address = AddressInput.model_validate({"country": country})
         except PydanticValidationError:
             return checkout
 
@@ -1604,10 +1948,33 @@ class CheckoutService:
         session.add(checkout)
         return checkout
 
+    async def _update_trial_end(self, checkout: Checkout) -> Checkout:
+        if not has_product_checkout(checkout):
+            checkout.trial_end = None
+            return checkout
+
+        if not checkout.product.is_recurring:
+            checkout.trial_end = None
+            return checkout
+
+        trial_interval = checkout.active_trial_interval
+        trial_interval_count = checkout.active_trial_interval_count
+
+        if trial_interval is not None and trial_interval_count is not None:
+            checkout.trial_end = trial_interval.get_end(utc_now(), trial_interval_count)
+        else:
+            checkout.trial_end = None
+
+        return checkout
+
     async def _validate_subscription_uniqueness(
         self, session: AsyncSession, checkout: Checkout
     ) -> None:
         organization = checkout.organization
+
+        # No product checkout
+        if not has_product_checkout(checkout):
+            return
 
         # Multiple subscriptions allowed
         if organization.allow_multiple_subscriptions:
@@ -1651,6 +2018,42 @@ class CheckoutService:
         if len(existing_subscriptions) > 0:
             raise AlreadyActiveSubscriptionError()
 
+    def _validate_custom_price_amount(
+        self,
+        price: ProductPrice,
+        amount: int,
+        loc: tuple[str, ...] = ("body", "amount"),
+    ) -> None:
+        """Validate that an amount is within the min/max bounds for a custom price."""
+        if not is_custom_price(price):
+            return
+
+        if price.minimum_amount is not None and amount < price.minimum_amount:
+            raise PolarRequestValidationError(
+                [
+                    {
+                        "type": "greater_than_equal",
+                        "loc": loc,
+                        "msg": "Amount is below minimum.",
+                        "input": amount,
+                        "ctx": {"ge": price.minimum_amount},
+                    }
+                ]
+            )
+
+        if price.maximum_amount is not None and amount > price.maximum_amount:
+            raise PolarRequestValidationError(
+                [
+                    {
+                        "type": "less_than_equal",
+                        "loc": loc,
+                        "msg": "Amount is above maximum.",
+                        "input": amount,
+                        "ctx": {"le": price.maximum_amount},
+                    }
+                ]
+            )
+
     def _get_required_confirm_fields(self, checkout: Checkout) -> set[tuple[str, ...]]:
         fields: set[tuple[str, ...]] = {("customer_email",)}
         if checkout.is_payment_form_required:
@@ -1665,12 +2068,13 @@ class CheckoutService:
             fields.update({("customer_billing_name",), ("customer_billing_address",)})
         return fields
 
+    @contextlib.asynccontextmanager
     async def _create_or_update_customer(
         self,
         session: AsyncSession,
         auth_subject: AuthSubject[User | Anonymous],
         checkout: Checkout,
-    ) -> Customer:
+    ) -> AsyncGenerator[Customer]:
         repository = CustomerRepository.from_session(session)
 
         created = False
@@ -1741,49 +2145,33 @@ class CheckoutService:
         }
 
         if created:
-            customer = await repository.create(customer, flush=True)
+            async with repository.create_context(customer, flush=False) as customer:
+                await member_service.create_owner_member(
+                    session, customer, checkout.organization
+                )
+                yield customer
         else:
-            customer = await repository.update(customer, flush=True)
-
-        return customer
-
-    async def _create_ad_hoc_custom_price(
-        self, checkout: Checkout, *, idempotency_key: str | None = None
-    ) -> stripe_lib.Price:
-        assert checkout.product.stripe_product_id is not None
-        price_params: stripe_lib.Price.CreateParams = {
-            "unit_amount": checkout.amount,
-            "currency": checkout.currency,
-            "metadata": {
-                "product_price_id": str(checkout.product_price_id),
-            },
-        }
-        if checkout.product.is_recurring:
-            recurring_interval: SubscriptionRecurringInterval
-            if isinstance(checkout.product_price, LegacyRecurringProductPriceCustom):
-                recurring_interval = checkout.product_price.recurring_interval
-            else:
-                assert checkout.product.recurring_interval is not None
-                recurring_interval = checkout.product.recurring_interval
-            price_params["recurring"] = {
-                "interval": recurring_interval.as_literal(),
-            }
-        return await stripe_service.create_price_for_product(
-            checkout.product.stripe_product_id,
-            price_params,
-            idempotency_key=idempotency_key,
-        )
+            yield await repository.update(customer, flush=True)
 
     async def _after_checkout_created(
         self, session: AsyncSession, checkout: Checkout
     ) -> None:
-        organization_repository = OrganizationRepository.from_session(session)
-        organization = await organization_repository.get_by_id(
-            checkout.product.organization_id
+        metadata = CheckoutCreatedMetadata(
+            checkout_id=str(checkout.id),
+            checkout_status=checkout.status,
         )
-        assert organization is not None
+        if checkout.product_id:
+            metadata["product_id"] = str(checkout.product_id)
+        await event_service.create_event(
+            session,
+            build_checkout_event(
+                SystemEvent.checkout_created,
+                checkout.organization,
+                metadata,
+            ),
+        )
         await webhook_service.send(
-            session, organization, WebhookEventType.checkout_created, checkout
+            session, checkout.organization, WebhookEventType.checkout_created, checkout
         )
 
     async def _after_checkout_updated(
@@ -1792,21 +2180,16 @@ class CheckoutService:
         await publish_checkout_event(
             checkout.client_secret, CheckoutEvent.updated, {"status": checkout.status}
         )
-        organization_repository = OrganizationRepository.from_session(session)
-        organization = await organization_repository.get_by_id(
-            checkout.product.organization_id
+        events = await webhook_service.send(
+            session, checkout.organization, WebhookEventType.checkout_updated, checkout
         )
-        if organization is not None:
-            events = await webhook_service.send(
-                session, organization, WebhookEventType.checkout_updated, checkout
+        # No webhook to send, publish the webhook_event immediately
+        if len(events) == 0:
+            await publish_checkout_event(
+                checkout.client_secret,
+                CheckoutEvent.webhook_event_delivered,
+                {"status": checkout.status},
             )
-            # No webhook to send, publish the webhook_event immediately
-            if len(events) == 0:
-                await publish_checkout_event(
-                    checkout.client_secret,
-                    CheckoutEvent.webhook_event_delivered,
-                    {"status": checkout.status},
-                )
 
     async def _eager_load_product(
         self, session: AsyncSession, product: Product

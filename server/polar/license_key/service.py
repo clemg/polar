@@ -21,7 +21,7 @@ from polar.models import (
     Organization,
     User,
 )
-from polar.postgres import AsyncSession
+from polar.postgres import AsyncReadSession, AsyncSession
 
 from .repository import LicenseKeyRepository
 from .schemas import (
@@ -38,7 +38,7 @@ log = structlog.get_logger()
 class LicenseKeyService:
     async def list(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         *,
         pagination: PaginationParams,
@@ -64,7 +64,7 @@ class LicenseKeyService:
 
     async def get(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         id: UUID,
     ) -> LicenseKey | None:
@@ -113,7 +113,7 @@ class LicenseKeyService:
         return lk
 
     async def get_activation_or_raise(
-        self, session: AsyncSession, *, license_key: LicenseKey, activation_id: UUID
+        self, session: AsyncReadSession, *, license_key: LicenseKey, activation_id: UUID
     ) -> LicenseKeyActivation:
         query = select(LicenseKeyActivation).where(
             LicenseKeyActivation.id == activation_id,
@@ -149,7 +149,7 @@ class LicenseKeyService:
         *,
         license_key: LicenseKey,
         validate: LicenseKeyValidate,
-    ) -> tuple[LicenseKey, LicenseKeyActivation | None]:
+    ) -> LicenseKey:
         bound_logger = log.bind(
             license_key_id=license_key.id,
             organization_id=license_key.organization_id,
@@ -165,7 +165,6 @@ class LicenseKeyService:
                 bound_logger.info("license_key.validate.invalid_ttl")
                 raise ResourceNotFound("License key has expired.")
 
-        activation = None
         if validate.activation_id:
             activation = await self.get_activation_or_raise(
                 session,
@@ -176,6 +175,7 @@ class LicenseKeyService:
                 # Skip logging UGC conditions
                 bound_logger.info("license_key.validate.invalid_conditions")
                 raise ResourceNotFound("License key does not match required conditions")
+            license_key.activation = activation
 
         if validate.benefit_id and validate.benefit_id != license_key.benefit_id:
             bound_logger.info("license_key.validate.invalid_benefit")
@@ -201,7 +201,7 @@ class LicenseKeyService:
         license_key.mark_validated(increment_usage=validate.increment_usage)
         session.add(license_key)
         bound_logger.info("license_key.validate")
-        return (license_key, activation)
+        return license_key
 
     async def get_activation_count(
         self,
@@ -224,8 +224,21 @@ class LicenseKeyService:
         license_key: LicenseKey,
         activate: LicenseKeyActivate,
     ) -> LicenseKeyActivation:
+        if not license_key.is_active():
+            raise NotPermitted(
+                "License key is no longer active. "
+                "This license key can not be activated."
+            )
+
+        if license_key.expires_at:
+            if utc_now() >= license_key.expires_at:
+                raise NotPermitted("License key has expired.")
+
         if not license_key.limit_activations:
-            raise NotPermitted("License key does not require activation")
+            raise NotPermitted(
+                "This license key does not support activations. "
+                "Use the /validate endpoint instead to check license validity."
+            )
 
         current_activation_count = await self.get_activation_count(
             session,
@@ -412,7 +425,6 @@ class LicenseKeyService:
         *,
         pagination: PaginationParams,
         benefit_id: UUID | None = None,
-        organization_ids: Sequence[UUID] | None = None,
     ) -> tuple[Sequence[LicenseKey], int]:
         query = (
             self._get_select_customer_base(auth_subject)
@@ -421,9 +433,6 @@ class LicenseKeyService:
                 joinedload(LicenseKey.benefit),
             )
         )
-
-        if organization_ids:
-            query = query.where(LicenseKey.organization_id.in_(organization_ids))
 
         if benefit_id:
             query = query.where(LicenseKey.benefit_id == benefit_id)

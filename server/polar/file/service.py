@@ -1,14 +1,14 @@
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 
 import structlog
 
 from polar.auth.models import AuthSubject
-from polar.integrations.aws.s3 import S3FileError
 from polar.kit.pagination import PaginationParams
 from polar.models import Organization, ProductMedia, User
 from polar.models.file import File, ProductMediaFile
-from polar.postgres import AsyncSession, sql
+from polar.postgres import AsyncReadSession, AsyncSession, sql
 
 from .repository import FileRepository
 from .s3 import S3_SERVICES
@@ -23,13 +23,10 @@ from .schemas import (
 log = structlog.get_logger()
 
 
-class FileError(S3FileError): ...
-
-
 class FileService:
     async def list(
         self,
-        session: AsyncSession,
+        session: AsyncReadSession,
         auth_subject: AuthSubject[User | Organization],
         *,
         organization_id: Sequence[uuid.UUID] | None = None,
@@ -143,13 +140,17 @@ class FileService:
 
         return file
 
-    def generate_downloadable_schema(self, file: File) -> FileDownload:
+    def generate_download_url(self, file: File) -> tuple[str, datetime]:
+        """Generate a presigned download URL for a file."""
         s3_service = S3_SERVICES[file.service]
-        url, expires_at = s3_service.generate_presigned_download_url(
+        return s3_service.generate_presigned_download_url(
             path=file.path,
             filename=file.name,
             mime_type=file.mime_type,
         )
+
+    def generate_downloadable_schema(self, file: File) -> FileDownload:
+        url, expires_at = self.generate_download_url(file)
         return FileDownload.from_presigned(file, url=url, expires_at=expires_at)
 
     async def delete(self, session: AsyncSession, *, file: File) -> bool:

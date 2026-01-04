@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import Any, Literal, LiteralString, NotRequired, TypedDict
+from typing import Any, ClassVar, Literal, LiteralString, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field, create_model
 from pydantic_core import ErrorDetails, InitErrorDetails, PydanticCustomError
@@ -21,6 +21,8 @@ class PolarError(Exception):
         headers: Additional headers to be included in the response.
     """
 
+    _schema: ClassVar[type[BaseModel] | None] = None
+
     def __init__(
         self,
         message: str,
@@ -34,13 +36,18 @@ class PolarError(Exception):
 
     @classmethod
     def schema(cls) -> type[BaseModel]:
+        if cls._schema is not None:
+            return cls._schema
+
         error_literal = Literal[cls.__name__]  # type: ignore
 
-        return create_model(
+        model = create_model(
             cls.__name__,
             error=(error_literal, Field(examples=[cls.__name__])),
             detail=(str, ...),
         )
+        cls._schema = model
+        return cls._schema
 
 
 class PolarTaskError(PolarError):
@@ -124,12 +131,22 @@ class ResourceAlreadyExists(PolarError):
         super().__init__(message, status_code)
 
 
+class PaymentNotReady(PolarError):
+    def __init__(
+        self,
+        message: str = "Organization is not ready to accept payments",
+        status_code: int = 403,
+    ) -> None:
+        super().__init__(message, status_code)
+
+
 class ValidationError(TypedDict):
     loc: tuple[int | str, ...]
     msg: LiteralString
     type: LiteralString
     input: Any
     ctx: NotRequired[dict[str, Any]]
+    url: NotRequired[str]
 
 
 class PolarRequestValidationError(PolarError):

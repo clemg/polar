@@ -11,9 +11,9 @@ const getAuthorizeResponse = async (
   searchParams: Record<string, string>,
 ): Promise<Response> => {
   const serializedSearchParams = new URLSearchParams(searchParams).toString()
-  let url = `${getServerURL()}/v1/oauth2/authorize?${serializedSearchParams}`
+  const url = `${getServerURL()}/v1/oauth2/authorize?${serializedSearchParams}`
 
-  const cookieStore = cookies()
+  const cookieStore = await cookies()
   return await fetch(url, {
     method: 'GET',
     credentials: 'include',
@@ -32,11 +32,10 @@ const getScopeDisplayNames = async (): Promise<
   return openAPISchema.components.schemas.Scope.enumNames
 }
 
-export default async function Page({
-  searchParams,
-}: {
-  searchParams: Record<string, string>
+export default async function Page(props: {
+  searchParams: Promise<Record<string, string>>
 }) {
+  const searchParams = await props.searchParams
   const response = await getAuthorizeResponse(searchParams)
 
   if (response.status >= 300 && response.status < 400) {
@@ -52,8 +51,12 @@ export default async function Page({
     const returnTo = `/oauth2/authorize?${serializedSearchParams}`
     const locationSearchParam = new URLSearchParams({
       return_to: returnTo,
-    }).toString()
-    const location = `/login?${locationSearchParam}`
+    })
+
+    if (searchParams.do_not_track) {
+      locationSearchParam.set('do_not_track', searchParams.do_not_track)
+    }
+    const location = `/login?${locationSearchParam.toString()}`
     redirect(location)
   }
 

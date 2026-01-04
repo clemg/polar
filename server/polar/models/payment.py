@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .checkout import Checkout
     from .order import Order
     from .organization import Organization
+    from .wallet import Wallet
 
 
 class PaymentStatus(StrEnum):
@@ -43,6 +44,9 @@ class Payment(RecordModel):
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     method: Mapped[str] = mapped_column(String, index=True, nullable=False)
     method_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    processor_metadata: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict
     )
     customer_email: Mapped[str | None] = mapped_column(
@@ -80,6 +84,17 @@ class Payment(RecordModel):
     @declared_attr
     def checkout(cls) -> Mapped["Checkout | None"]:
         return relationship("Checkout", lazy="raise")
+
+    wallet_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("wallets.id", ondelete="set null"),
+        nullable=True,
+        index=True,
+    )
+
+    @declared_attr
+    def wallet(cls) -> Mapped["Wallet | None"]:
+        return relationship("Wallet", lazy="raise")
 
     order_id: Mapped[UUID | None] = mapped_column(
         Uuid,

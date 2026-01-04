@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import Select, UnaryExpression, asc, desc, or_, select
+from sqlalchemy import Select, UnaryExpression, asc, desc, select
 from sqlalchemy.orm import contains_eager, joinedload, selectinload
 
 from polar.auth.models import AuthSubject
@@ -25,15 +25,21 @@ from polar.subscription.service import subscription as subscription_service
 from ..schemas.subscription import (
     CustomerSubscriptionUpdate,
     CustomerSubscriptionUpdateProduct,
+    CustomerSubscriptionUpdateSeats,
 )
 
 
 class CustomerSubscriptionError(PolarError): ...
 
 
-class UpdateSubscriptionNotAllowed(CustomerSubscriptionError):
+class UpdateSubscriptionPlanNotAllowed(CustomerSubscriptionError):
     def __init__(self) -> None:
-        super().__init__("Updating subscription is not allowed.", 403)
+        super().__init__("Updating subscription plan is not allowed.", 403)
+
+
+class UpdateSubscriptionSeatsNotAllowed(CustomerSubscriptionError):
+    def __init__(self) -> None:
+        super().__init__("Updating subscription seats is not allowed.", 403)
 
 
 class CustomerSubscriptionSortProperty(StrEnum):
@@ -50,7 +56,6 @@ class CustomerSubscriptionService(ResourceServiceReader[Subscription]):
         session: AsyncSession,
         auth_subject: AuthSubject[Customer],
         *,
-        organization_id: Sequence[uuid.UUID] | None = None,
         product_id: Sequence[uuid.UUID] | None = None,
         active: bool | None = None,
         query: str | None = None,
@@ -76,9 +81,6 @@ class CustomerSubscriptionService(ResourceServiceReader[Subscription]):
             )
         )
 
-        if organization_id is not None:
-            statement = statement.where(Product.organization_id.in_(organization_id))
-
         if product_id is not None:
             statement = statement.where(Subscription.product_id.in_(product_id))
 
@@ -89,12 +91,7 @@ class CustomerSubscriptionService(ResourceServiceReader[Subscription]):
                 statement = statement.where(Subscription.revoked.is_(True))
 
         if query is not None:
-            statement = statement.where(
-                or_(
-                    Product.name.ilike(f"%{query}%"),
-                    Organization.slug.ilike(f"%{query}%"),
-                )
-            )
+            statement = statement.where(Product.name.ilike(f"%{query}%"))
 
         order_by_clauses: list[UnaryExpression[Any]] = []
         for criterion, is_desc in sorting:
@@ -142,15 +139,26 @@ class CustomerSubscriptionService(ResourceServiceReader[Subscription]):
         *,
         updates: CustomerSubscriptionUpdate,
     ) -> Subscription:
+        organization = subscription.product.organization
         if isinstance(updates, CustomerSubscriptionUpdateProduct):
-            organization = subscription.product.organization
-            if not organization.allow_customer_updates:
-                raise UpdateSubscriptionNotAllowed()
+            if not organization.customer_portal_subscription_update_plan:
+                raise UpdateSubscriptionPlanNotAllowed()
 
             return await self.update_product(
                 session,
                 subscription,
                 product_id=updates.product_id,
+            )
+
+        if isinstance(updates, CustomerSubscriptionUpdateSeats):
+            if not organization.customer_portal_subscription_update_seats:
+                raise UpdateSubscriptionSeatsNotAllowed()
+
+            return await subscription_service.update_seats(
+                session,
+                subscription,
+                seats=updates.seats,
+                proration_behavior=updates.proration_behavior,
             )
 
         cancel = updates.cancel_at_period_end is True

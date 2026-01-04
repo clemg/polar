@@ -2,7 +2,7 @@ import { getServerSideAPI } from '@/utils/client/serverside'
 import { getOrganizationOrNotFound } from '@/utils/customerPortal'
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
-import ClientPage from './ClientPage'
+import OverviewPage from './OverviewPage'
 
 const cacheConfig = {
   cache: 'no-store' as RequestCache,
@@ -11,12 +11,11 @@ const cacheConfig = {
   },
 }
 
-export async function generateMetadata({
-  params,
-}: {
-  params: { organization: string }
+export async function generateMetadata(props: {
+  params: Promise<{ organization: string }>
 }): Promise<Metadata> {
-  const api = getServerSideAPI()
+  const params = await props.params
+  const api = await getServerSideAPI()
   const { organization } = await getOrganizationOrNotFound(
     api,
     params.organization,
@@ -53,17 +52,17 @@ export async function generateMetadata({
   }
 }
 
-export default async function Page({
-  params,
-  searchParams,
-}: {
-  params: { organization: string }
-  searchParams: { customer_session_token?: string }
+export default async function Page(props: {
+  params: Promise<{ organization: string }>
+  searchParams: Promise<{ customer_session_token?: string }>
 }) {
-  const api = getServerSideAPI(searchParams.customer_session_token)
+  const { customer_session_token, ...searchParams } = await props.searchParams
+  const params = await props.params
+  const api = await getServerSideAPI(customer_session_token)
   const { organization, products } = await getOrganizationOrNotFound(
     api,
     params.organization,
+    searchParams,
   )
 
   const [
@@ -77,12 +76,16 @@ export default async function Page({
       error: benefitGrantsError,
       response: benefitGrantsResponse,
     },
+    {
+      data: claimedSubscriptions,
+      error: claimedSubscriptionsError,
+      response: claimedSubscriptionsResponse,
+    },
   ] = await Promise.all([
     api.GET('/v1/customer-portal/subscriptions/', {
       params: {
         query: {
-          organization_id: organization.id,
-          limit: 200,
+          limit: 100,
         },
       },
       ...cacheConfig,
@@ -91,19 +94,25 @@ export default async function Page({
     api.GET('/v1/customer-portal/benefit-grants/', {
       params: {
         query: {
-          organization_id: organization.id,
-          limit: 200,
+          limit: 100,
         },
       },
+      ...cacheConfig,
+    }),
+
+    api.GET('/v1/customer-portal/seats/subscriptions', {
       ...cacheConfig,
     }),
   ])
 
   if (
     subscriptionsResponse.status === 401 ||
-    benefitGrantsResponse.status === 401
+    benefitGrantsResponse.status === 401 ||
+    claimedSubscriptionsResponse.status === 401
   ) {
-    redirect(`/${organization.slug}/portal/request`)
+    redirect(
+      `/${organization.slug}/portal/request?${new URLSearchParams(searchParams)}`,
+    )
   }
 
   if (subscriptionsError) {
@@ -114,13 +123,18 @@ export default async function Page({
     throw benefitGrantsError
   }
 
+  if (claimedSubscriptionsError) {
+    throw claimedSubscriptionsError
+  }
+
   return (
-    <ClientPage
+    <OverviewPage
       organization={organization}
       products={products}
       subscriptions={subscriptions}
+      claimedSubscriptions={claimedSubscriptions ?? []}
       benefitGrants={benefitGrants}
-      customerSessionToken={searchParams.customer_session_token as string}
+      customerSessionToken={customer_session_token as string}
     />
   )
 }

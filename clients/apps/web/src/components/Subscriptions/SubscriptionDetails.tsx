@@ -7,6 +7,39 @@ import { formatCurrencyAndAmount } from '@polar-sh/ui/lib/money'
 import { DetailRow } from '../Shared/DetailRow'
 import { SubscriptionStatus } from './SubscriptionStatus'
 
+const formatRecurringSchedule = (
+  interval: schemas['SubscriptionRecurringInterval'],
+  intervalCount: number | null,
+): string => {
+  const count = intervalCount && intervalCount > 1 ? intervalCount : null
+
+  if (count) {
+    const intervalLabel =
+      interval === 'day'
+        ? 'Day'
+        : interval === 'week'
+          ? 'Week'
+          : interval === 'month'
+            ? 'Month'
+            : 'Year'
+    const pluralLabel = `${intervalLabel}${count > 1 ? 's' : ''}`
+    return `Every ${count} ${pluralLabel}`
+  }
+
+  switch (interval) {
+    case 'day':
+      return 'Daily'
+    case 'week':
+      return 'Weekly'
+    case 'month':
+      return 'Monthly'
+    case 'year':
+      return 'Yearly'
+    default:
+      return interval
+  }
+}
+
 const CANCELLATION_REASONS: {
   [key: string]: string
 } = {
@@ -63,6 +96,13 @@ const SubscriptionDetails = ({ subscription }: SubscriptionDetailsProps) => {
           value={<FormattedDateTime datetime={subscription.created_at} />}
         />
 
+        {subscription.status === 'trialing' && subscription.trial_end && (
+          <DetailRow
+            label="Trial End Date"
+            value={<FormattedDateTime datetime={subscription.trial_end} />}
+          />
+        )}
+
         {nextEventDatetime && (
           <DetailRow
             label={subscription.ends_at ? 'Ending Date' : 'Renewal Date'}
@@ -78,8 +118,11 @@ const SubscriptionDetails = ({ subscription }: SubscriptionDetailsProps) => {
         )}
 
         <DetailRow
-          label="Recurring Interval"
-          value={subscription.recurring_interval === 'month' ? 'Month' : 'Year'}
+          label="Billing Schedule"
+          value={formatRecurringSchedule(
+            subscription.recurring_interval,
+            subscription.recurring_interval_count,
+          )}
         />
 
         <DetailRow
@@ -91,7 +134,10 @@ const SubscriptionDetails = ({ subscription }: SubscriptionDetailsProps) => {
           label="Amount"
           value={
             subscription.amount
-              ? formatCurrencyAndAmount(subscription.amount)
+              ? formatCurrencyAndAmount(
+                  subscription.amount,
+                  subscription.currency,
+                )
               : '—'
           }
         />

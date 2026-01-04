@@ -1,6 +1,6 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "palm",
+  "theme": "maple",
   "appearance": {
     "default": "system"
   },
@@ -17,10 +17,15 @@
     }
   },
   "favicon": "./logo/favicon.png",
+  "integrations": {
+    "ga4": {
+      "measurementId": "G-MBYW1QZFHE"
+    }
+  },
   "navigation": {
-    "anchors": [
+    "tabs": [
       {
-        "anchor": "Docs",
+        "tab": "Docs",
         "icon": "compass",
         "groups": [
           {
@@ -52,25 +57,36 @@
                 ]
               },
               {
+                "group": "Cost Insights",
+                "tag": "Beta",
+                "pages": [
+                  "features/cost-insights/introduction",
+                  "features/cost-insights/cost-events",
+                  "features/cost-insights/cost-traces"
+                ]
+              },
+              {
                 "group": "Benefits",
                 "pages": [
                   "features/benefits/introduction",
-                  "features/benefits/license-keys",
-                  "features/benefits/file-downloads",
-                  "features/benefits/discord-access",
-                  "features/benefits/github-access",
                   "features/benefits/credits",
-                  "features/benefits/custom"
+                  "features/benefits/custom",
+                  "features/benefits/discord-access",
+                  "features/benefits/file-downloads",
+                  "features/benefits/github-access",
+                  "features/benefits/license-keys"
                 ]
               },
               {
                 "group": "Checkout",
                 "pages": [
-                  "features/checkout/links",
                   "features/checkout/embed",
+                  "features/checkout/links",
                   "features/checkout/session"
                 ]
               },
+              "features/trials",
+              "features/seat-based-pricing",
               "features/custom-fields",
               "features/discounts",
               "features/orders",
@@ -89,12 +105,12 @@
               {
                 "group": "Integrations",
                 "pages": [
-                  "features/integrations/raycast",
-                  "features/integrations/framer",
-                  "features/integrations/zapier",
-                  "features/integrations/paritydeals",
                   "features/integrations/affonso",
-                  "features/integrations/fernand"
+                  "features/integrations/fernand",
+                  "features/integrations/framer",
+                  "features/integrations/paritydeals",
+                  "features/integrations/raycast",
+                  "features/integrations/zapier"
                 ]
               }
             ]
@@ -109,28 +125,29 @@
               {
                 "group": "SDKs",
                 "pages": [
-                  "integrate/sdk/typescript",
-                  "integrate/sdk/python",
+                  "integrate/sdk/golang",
                   "integrate/sdk/php",
-                  "integrate/sdk/golang"
+                  "integrate/sdk/python",
+                  "integrate/sdk/typescript"
                 ]
               },
               {
                 "group": "Framework Adapters",
                 "pages": [
-                  "integrate/sdk/adapters/nextjs",
-                  "integrate/sdk/adapters/better-auth",
-                  "integrate/sdk/adapters/nuxt",
                   "integrate/sdk/adapters/astro",
-                  "integrate/sdk/adapters/remix",
-                  "integrate/sdk/adapters/tanstack-start",
-                  "integrate/sdk/adapters/sveltekit",
+                  "integrate/sdk/adapters/better-auth",
                   "integrate/sdk/adapters/deno",
                   "integrate/sdk/adapters/elysia",
                   "integrate/sdk/adapters/express",
                   "integrate/sdk/adapters/fastify",
                   "integrate/sdk/adapters/hono",
-                  "integrate/sdk/adapters/laravel"
+                  "integrate/sdk/adapters/laravel",
+                  "integrate/sdk/adapters/nextjs",
+                  "integrate/sdk/adapters/nuxt",
+                  "integrate/sdk/adapters/remix",
+                  "integrate/sdk/adapters/supabase",
+                  "integrate/sdk/adapters/sveltekit",
+                  "integrate/sdk/adapters/tanstack-start"
                 ]
               },
               {
@@ -168,12 +185,12 @@
         ]
       },
       {
-        "anchor": "API Reference",
+        "tab": "API Reference",
         "icon": "rectangle-terminal",
         "groups": [
           {
             "group": "General",
-            "pages": ["api-reference/rate-limits"]
+            "pages": ["api-reference/introduction"]
           },
           {
             "group": "Core API",
@@ -230,6 +247,7 @@
                 "pages": [
                   "api-reference/subscriptions/get",
                   "api-reference/subscriptions/list",
+                  "api-reference/subscriptions/create",
                   "api-reference/subscriptions/update",
                   "api-reference/subscriptions/revoke"
                 ]
@@ -313,7 +331,21 @@
                   "api-reference/license-keys/get",
                   "api-reference/license-keys/list",
                   "api-reference/license-keys/update",
-                  "api-reference/license-keys/get-activation"
+                  "api-reference/license-keys/get-activation",
+                  "api-reference/license-keys/validate",
+                  "api-reference/license-keys/activate",
+                  "api-reference/license-keys/deactivate"
+                ]
+              },
+              {
+                "group": "Customer Seats",
+                "pages": [
+                  "api-reference/customer-seats/assign",
+                  "api-reference/customer-seats/list",
+                  "api-reference/customer-seats/revoke",
+                  "api-reference/customer-seats/resend",
+                  "api-reference/customer-seats/get-claim-info",
+                  "api-reference/customer-seats/claim"
                 ]
               },
               {
@@ -388,6 +420,16 @@
                   "api-reference/customer-portal/downloadables/get",
                   "api-reference/customer-portal/downloadables/list"
                 ]
+              },
+              {
+                "group": "Seats",
+                "pages": [
+                  "api-reference/customer-portal/seats/list",
+                  "api-reference/customer-portal/seats/assign",
+                  "api-reference/customer-portal/seats/revoke",
+                  "api-reference/customer-portal/seats/resend",
+                  "api-reference/customer-portal/seats/list-subscriptions"
+                ]
               }
             ]
           },
@@ -431,6 +473,14 @@
                       "api-reference/webhooks/order.paid",
                       "api-reference/webhooks/order.updated",
                       "api-reference/webhooks/order.refunded"
+                    ]
+                  },
+                  {
+                    "group": "Customer Seats",
+                    "pages": [
+                      "api-reference/webhooks/customer_seat.assigned",
+                      "api-reference/webhooks/customer_seat.claimed",
+                      "api-reference/webhooks/customer_seat.revoked"
                     ]
                   },
                   {
@@ -490,16 +540,6 @@
                 ]
               },
               {
-                "group": "OAuth 2.0 Clients",
-                "pages": [
-                  "api-reference/oauth2/clients/create",
-                  "api-reference/oauth2/clients/get",
-                  "api-reference/oauth2/clients/list",
-                  "api-reference/oauth2/clients/update",
-                  "api-reference/oauth2/clients/delete"
-                ]
-              },
-              {
                 "group": "Webhooks",
                 "pages": [
                   "api-reference/webhooks/endpoints/create",
@@ -514,24 +554,43 @@
         ]
       },
       {
-        "anchor": "Changelog",
-        "icon": "signal-stream",
+        "tab": "Guides",
+        "icon": "book-open",
         "groups": [
           {
-            "group": "Changelog",
-            "pages": ["changelog/recent", "changelog/api"]
+            "group": "Guides",
+            "pages": [
+              "guides/introduction",
+              "guides/allow-multiple-subscriptions-per-customer",
+              "guides/automate-post-purchase-link-sharing",
+              "guides/change-email-as-merchant",
+              "guides/create-checkout-session",
+              "guides/create-multiple-organizations",
+              "guides/create-variants",
+              "guides/customize-benefits-order-in-checkouts",
+              "guides/customize-products-order-in-checkouts",
+              "guides/disable-subscription-changes-in-customer-portal",
+              "guides/disable-email-editing-in-checkout",
+              "guides/grant-meter-credits-after-purchase",
+              "guides/grant-meter-credits-before-purchase",
+              "guides/subscription-downgrades",
+              "guides/schedule-subscription-downgrades-qstash",
+              "guides/subscription-upgrades",
+              "guides/seat-based-pricing",
+              "guides/theme-switch-in-checkout"
+            ]
           }
         ]
       },
       {
-        "anchor": "Support",
+        "tab": "Changelog",
+        "icon": "signal-stream",
+        "pages": ["changelog/recent", "changelog/api"]
+      },
+      {
+        "tab": "Support",
         "icon": "square-question",
-        "groups": [
-          {
-            "group": "Contact Us",
-            "pages": ["support"]
-          }
-        ]
+        "pages": ["support"]
       }
     ]
   },
@@ -543,25 +602,17 @@
   "navbar": {
     "links": [
       {
-        "label": "llms.txt",
-        "href": "https://docs.polar.sh/llms.txt"
-      },
-      {
         "label": "llms-full.txt",
-        "href": "https://docs.polar.sh/llms-full.txt"
+        "href": "https://polar.sh/docs/llms-full.txt"
       },
       {
-        "label": "Discord",
-        "href": "https://dub.sh/polar-discord"
-      },
-      {
-        "label": "GitHub",
-        "href": "https://github.com/polarsource/polar"
+        "label": "Contact support",
+        "href": "https://polar.sh/docs/support"
       }
     ],
     "primary": {
       "type": "button",
-      "label": "Get Started",
+      "label": "Dashboard",
       "href": "https://polar.sh"
     }
   },
@@ -951,6 +1002,10 @@
     {
       "source": "/docs/benefits/custom",
       "destination": "/features/benefits/custom"
+    },
+    {
+      "source": "/docs/features/customers",
+      "destination": "/features/customer-management"
     }
   ]
 }

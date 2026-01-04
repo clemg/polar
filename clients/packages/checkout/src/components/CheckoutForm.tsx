@@ -1,5 +1,6 @@
 'use client'
 
+import { CountryAlpha2Input } from '@polar-sh/sdk/models/components/addressinput'
 import type { CheckoutConfirmStripe } from '@polar-sh/sdk/models/components/checkoutconfirmstripe'
 import type { CheckoutPublic } from '@polar-sh/sdk/models/components/checkoutpublic'
 import type { CheckoutPublicConfirmed } from '@polar-sh/sdk/models/components/checkoutpublicconfirmed'
@@ -7,6 +8,7 @@ import type { CheckoutUpdatePublic } from '@polar-sh/sdk/models/components/check
 import Button from '@polar-sh/ui/components/atoms/Button'
 import CountryPicker from '@polar-sh/ui/components/atoms/CountryPicker'
 import CountryStatePicker from '@polar-sh/ui/components/atoms/CountryStatePicker'
+import FormattedDateTime from '@polar-sh/ui/components/atoms/FormattedDateTime'
 import Input from '@polar-sh/ui/components/atoms/Input'
 import { Checkbox } from '@polar-sh/ui/components/ui/checkbox'
 import {
@@ -32,11 +34,16 @@ import {
 } from '@stripe/stripe-js'
 import { PropsWithChildren, useCallback, useEffect, useMemo } from 'react'
 import { UseFormReturn, WatchObserver } from 'react-hook-form'
+import { hasProductCheckout } from '../guards'
 import { useDebouncedCallback } from '../hooks/debounce'
 import { isDisplayedField, isRequiredField } from '../utils/address'
 import { getDiscountDisplay } from '../utils/discount'
 import { formatCurrencyNumber } from '../utils/money'
-import { getMeteredPrices, hasLegacyRecurringPrices } from '../utils/product'
+import {
+  formatRecurringInterval,
+  getMeteredPrices,
+  hasLegacyRecurringPrices,
+} from '../utils/product'
 import AmountLabel from './AmountLabel'
 import CustomFieldInput from './CustomFieldInput'
 import MeteredPriceLabel from './MeteredPriceLabel'
@@ -49,7 +56,7 @@ const DetailRow = ({
 }: PropsWithChildren<{ title: string; emphasis?: boolean }>) => {
   return (
     <div
-      className={`flex flex-row items-center justify-between gap-x-8 ${emphasis ? 'font-medium' : 'dark:text-polar-500 text-gray-500'}`}
+      className={`flex flex-row items-start justify-between gap-x-8 ${emphasis ? 'font-medium' : 'dark:text-polar-500 text-gray-500'}`}
     >
       <span>{title}</span>
       {children}
@@ -85,6 +92,7 @@ interface BaseCheckoutFormProps {
   loading: boolean
   loadingLabel: string | undefined
   disabled?: boolean
+  isUpdatePending?: boolean
   themePreset: ThemingPresetProps
 }
 
@@ -96,12 +104,18 @@ const BaseCheckoutForm = ({
   loading,
   loadingLabel,
   disabled,
+  isUpdatePending,
   children,
   themePreset: themePresetProps,
 }: React.PropsWithChildren<BaseCheckoutFormProps>) => {
-  const interval = hasLegacyRecurringPrices(checkout.product)
-    ? checkout.productPrice.recurringInterval
-    : checkout.product.recurringInterval
+  const interval = hasProductCheckout(checkout)
+    ? hasLegacyRecurringPrices(checkout.prices[checkout.product.id])
+      ? checkout.productPrice.recurringInterval
+      : checkout.product.recurringInterval
+    : null
+  const intervalCount = hasProductCheckout(checkout)
+    ? checkout.product.recurringIntervalCount
+    : null
   const {
     control,
     handleSubmit,
@@ -115,11 +129,10 @@ const BaseCheckoutForm = ({
   const discount = checkout.discount
   const isDiscountWithoutCode = discount && discount.code === null
 
-  const { product, productPrice, isBusinessCustomer } = checkout
-  const meteredPrices = useMemo(() => getMeteredPrices(product), [product])
-  const onlyMeteredPrices = useMemo(
-    () => meteredPrices.length === product.prices.length,
-    [meteredPrices, product],
+  const { product, prices, isBusinessCustomer } = checkout
+  const meteredPrices = useMemo(
+    () => (product && prices ? getMeteredPrices(prices[product.id]) : []),
+    [product],
   )
 
   const country = watch('customerBillingAddress.country')
@@ -154,12 +167,6 @@ const BaseCheckoutForm = ({
           }
           clearErrors('customerBillingAddress')
         }
-      } else if (name === 'isBusinessCustomer') {
-        const { isBusinessCustomer } = value
-        payload = {
-          ...payload,
-          isBusinessCustomer,
-        }
       }
 
       if (Object.keys(payload).length === 0) {
@@ -191,6 +198,21 @@ const BaseCheckoutForm = ({
       resetField('discountCode')
     } catch {}
   }, [update, clearErrors, resetField])
+
+  useEffect(() => {
+    if (!discountCode && !checkout.discount) {
+      clearErrors('discountCode')
+    }
+  }, [discountCode, checkout.discount, clearErrors])
+
+  const updateBusinessCustomer = useCallback(
+    async (isBusinessCustomer: boolean) => {
+      try {
+        await update({ isBusinessCustomer })
+      } catch {}
+    },
+    [update],
+  )
 
   useEffect(() => {
     const subscription = watch(debouncedWatcher)
@@ -249,6 +271,74 @@ const BaseCheckoutForm = ({
     }
   }, [checkout, resetField])
 
+  const formattedDiscountDuration = useMemo(() => {
+    if (!checkout.discount) {
+      return ''
+    }
+
+    if (!interval) {
+      return ''
+    }
+
+    if (checkout.discount.duration === 'forever') {
+      return ''
+    }
+
+    if (checkout.discount.duration === 'once') {
+      // For "once" with an interval count > 1, describe the actual billing period
+      if (intervalCount && intervalCount > 1) {
+        const pluralInterval = `${interval}${intervalCount > 1 ? 's' : ''}`
+        return `for the first ${intervalCount} ${pluralInterval}`
+      }
+      return `for the first ${interval}`
+    }
+
+    const durationInMonths =
+      'durationInMonths' in checkout.discount && checkout.discount
+        ? checkout.discount.durationInMonths
+        : -1
+
+    // Discount duration is always in months, so a 13 month discount on a yearly billing schedule
+    // will apply on the first two years.
+    // For clarity, we convert that here.
+    // When we ship other intervals like daily or weekly, "for the first xyz months" is probably
+    // better language than "for the first xyz days" anyway.
+    const calculatedDuration =
+      interval === 'year' ? Math.ceil(durationInMonths / 12) : durationInMonths
+
+    if (calculatedDuration <= 1) {
+      // For single period with interval count > 1, describe the actual billing period
+      if (intervalCount && intervalCount > 1) {
+        const pluralInterval = `${interval}${intervalCount > 1 ? 's' : ''}`
+        return `for the first ${intervalCount} ${pluralInterval}`
+      }
+      return `for the first ${interval}`
+    }
+
+    return `for the first ${calculatedDuration} ${interval === 'year' ? 'years' : 'months'}`
+  }, [checkout.discount, interval, intervalCount])
+
+  const totalLabel = useMemo(() => {
+    if (interval) {
+      const formatted = formatRecurringInterval(interval, intervalCount, 'long')
+      return `Every ${formatted}`
+    }
+
+    return 'Total'
+  }, [interval, intervalCount])
+
+  const checkoutLabel = useMemo(() => {
+    if (checkout.activeTrialInterval) {
+      return `Start Trial`
+    }
+
+    if (checkout.isPaymentFormRequired) {
+      return interval ? 'Subscribe' : 'Pay'
+    }
+
+    return 'Submit'
+  }, [checkout, interval])
+
   return (
     <div className="flex flex-col justify-between gap-y-24">
       <div className="flex flex-col gap-y-12">
@@ -271,7 +361,6 @@ const BaseCheckoutForm = ({
                       <Input
                         type="email"
                         autoComplete="email"
-                        className={themePresetProps.polar.input}
                         {...field}
                         value={field.value || ''}
                         disabled={checkout.customerId !== null}
@@ -296,7 +385,6 @@ const BaseCheckoutForm = ({
                       <FormLabel>Cardholder name</FormLabel>
                       <FormControl>
                         <Input
-                          className={themePresetProps.polar.input}
                           type="text"
                           autoComplete="name"
                           {...field}
@@ -317,11 +405,18 @@ const BaseCheckoutForm = ({
                     name="isBusinessCustomer"
                     render={({ field }) => (
                       <FormItem>
-                        <div className="flex flex-row items-center space-x-3 space-y-0">
+                        <div className="flex flex-row items-center space-y-0 space-x-3">
                           <FormControl>
                             <Checkbox
                               checked={field.value ? field.value : false}
-                              onCheckedChange={field.onChange}
+                              onCheckedChange={(checked) => {
+                                if (isUpdatePending) {
+                                  return
+                                }
+
+                                field.onChange(checked)
+                                updateBusinessCustomer(!!checked)
+                              }}
                             />
                           </FormControl>
                           <FormLabel>
@@ -345,7 +440,6 @@ const BaseCheckoutForm = ({
                           <FormLabel>Business name</FormLabel>
                           <FormControl>
                             <Input
-                              className={themePresetProps.polar.input}
                               type="text"
                               autoComplete="billing organization"
                               {...field}
@@ -378,7 +472,6 @@ const BaseCheckoutForm = ({
                                 type="text"
                                 autoComplete="billing address-line1"
                                 placeholder="Line 1"
-                                className={themePresetProps.polar.input}
                                 {...field}
                                 value={field.value || ''}
                               />
@@ -406,7 +499,6 @@ const BaseCheckoutForm = ({
                                 type="text"
                                 autoComplete="billing address-line2"
                                 placeholder="Line 2"
-                                className={themePresetProps.polar.input}
                                 {...field}
                                 value={field.value || ''}
                               />
@@ -416,66 +508,71 @@ const BaseCheckoutForm = ({
                         />
                       </FormControl>
                     )}
-                    <div className="grid grid-cols-2 gap-x-2">
-                      {isDisplayedField(
-                        checkout.billingAddressFields.postalCode,
-                      ) && (
-                        <FormControl>
-                          <FormField
-                            control={control}
-                            name="customerBillingAddress.postalCode"
-                            rules={{
-                              required: isRequiredField(
-                                checkout.billingAddressFields.postalCode,
-                              )
-                                ? 'This field is required'
-                                : false,
-                            }}
-                            render={({ field }) => (
-                              <div>
-                                <Input
-                                  type="text"
-                                  autoComplete="billing postal-code"
-                                  placeholder="Postal code"
-                                  className={themePresetProps.polar.input}
-                                  {...field}
-                                  value={field.value || ''}
-                                />
-                                <FormMessage />
-                              </div>
-                            )}
-                          />
-                        </FormControl>
-                      )}
-                      {isDisplayedField(checkout.billingAddressFields.city) && (
-                        <FormControl>
-                          <FormField
-                            control={control}
-                            name="customerBillingAddress.city"
-                            rules={{
-                              required: isRequiredField(
-                                checkout.billingAddressFields.city,
-                              )
-                                ? 'This field is required'
-                                : false,
-                            }}
-                            render={({ field }) => (
-                              <div>
-                                <Input
-                                  type="text"
-                                  autoComplete="billing address-level2"
-                                  placeholder="City"
-                                  className={themePresetProps.polar.input}
-                                  {...field}
-                                  value={field.value || ''}
-                                />
-                                <FormMessage />
-                              </div>
-                            )}
-                          />
-                        </FormControl>
-                      )}
-                    </div>
+                    {(isDisplayedField(
+                      checkout.billingAddressFields.postalCode,
+                    ) ||
+                      isDisplayedField(checkout.billingAddressFields.city)) && (
+                      <div className="grid grid-cols-2 gap-x-2">
+                        {isDisplayedField(
+                          checkout.billingAddressFields.postalCode,
+                        ) && (
+                          <FormControl>
+                            <FormField
+                              control={control}
+                              name="customerBillingAddress.postalCode"
+                              rules={{
+                                required: isRequiredField(
+                                  checkout.billingAddressFields.postalCode,
+                                )
+                                  ? 'This field is required'
+                                  : false,
+                              }}
+                              render={({ field }) => (
+                                <div>
+                                  <Input
+                                    type="text"
+                                    autoComplete="billing postal-code"
+                                    placeholder="Postal code"
+                                    {...field}
+                                    value={field.value || ''}
+                                  />
+                                  <FormMessage />
+                                </div>
+                              )}
+                            />
+                          </FormControl>
+                        )}
+                        {isDisplayedField(
+                          checkout.billingAddressFields.city,
+                        ) && (
+                          <FormControl>
+                            <FormField
+                              control={control}
+                              name="customerBillingAddress.city"
+                              rules={{
+                                required: isRequiredField(
+                                  checkout.billingAddressFields.city,
+                                )
+                                  ? 'This field is required'
+                                  : false,
+                              }}
+                              render={({ field }) => (
+                                <div>
+                                  <Input
+                                    type="text"
+                                    autoComplete="billing address-level2"
+                                    placeholder="City"
+                                    {...field}
+                                    value={field.value || ''}
+                                  />
+                                  <FormMessage />
+                                </div>
+                              )}
+                            />
+                          </FormControl>
+                        )}
+                      </div>
+                    )}
                     {isDisplayedField(checkout.billingAddressFields.state) && (
                       <FormControl>
                         <FormField
@@ -495,13 +592,6 @@ const BaseCheckoutForm = ({
                                 country={country}
                                 value={field.value || ''}
                                 onChange={field.onChange}
-                                className={themePresetProps.polar.dropdown}
-                                itemClassName={
-                                  themePresetProps.polar.dropdownItem
-                                }
-                                contentClassName={
-                                  themePresetProps.polar.dropdownContent
-                                }
                               />
                               <FormMessage />
                             </>
@@ -526,16 +616,12 @@ const BaseCheckoutForm = ({
                           render={({ field }) => (
                             <>
                               <CountryPicker
+                                allowedCountries={Object.values(
+                                  CountryAlpha2Input,
+                                )}
                                 autoComplete="billing country"
                                 value={field.value || undefined}
                                 onChange={field.onChange}
-                                className={themePresetProps.polar.dropdown}
-                                itemClassName={
-                                  themePresetProps.polar.dropdownItem
-                                }
-                                contentClassName={
-                                  themePresetProps.polar.dropdownContent
-                                }
                               />
                               <FormMessage />
                             </>
@@ -567,7 +653,6 @@ const BaseCheckoutForm = ({
                               <Input
                                 type="text"
                                 autoComplete="off"
-                                className={themePresetProps.polar.input}
                                 {...field}
                                 value={field.value || ''}
                                 disabled={validTaxID}
@@ -579,7 +664,6 @@ const BaseCheckoutForm = ({
                                     variant="secondary"
                                     size="sm"
                                     onClick={addTaxID}
-                                    className={themePresetProps.polar.button}
                                   >
                                     Apply
                                   </Button>
@@ -590,7 +674,6 @@ const BaseCheckoutForm = ({
                                     variant="secondary"
                                     size="sm"
                                     onClick={() => clearTaxId()}
-                                    className={themePresetProps.polar.button}
                                   >
                                     <XIcon className="h-4 w-4" />
                                   </Button>
@@ -612,8 +695,8 @@ const BaseCheckoutForm = ({
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel className="flex flex-row items-center justify-between">
-                        <div>Discount Code</div>
-                        <div className="dark:text-polar-500 text-xs text-gray-500">
+                        <div>Discount code</div>
+                        <div className="dark:text-polar-500 text-xs font-normal text-gray-500">
                           Optional
                         </div>
                       </FormLabel>
@@ -622,7 +705,6 @@ const BaseCheckoutForm = ({
                           <Input
                             type="text"
                             autoComplete="off"
-                            className={themePresetProps.polar.input}
                             {...field}
                             value={field.value || ''}
                             disabled={checkoutDiscounted}
@@ -640,7 +722,6 @@ const BaseCheckoutForm = ({
                                 variant="secondary"
                                 size="sm"
                                 onClick={addDiscountCode}
-                                className={themePresetProps.polar.button}
                               >
                                 Apply
                               </Button>
@@ -663,26 +744,29 @@ const BaseCheckoutForm = ({
                   )}
                 />
               )}
-              {checkout.attachedCustomFields.map(
-                ({ customField, required }) => (
-                  <FormField
-                    key={customField.id}
-                    control={control}
-                    name={`customFieldData.${customField.slug}`}
-                    rules={{
-                      required: required ? 'This field is required' : undefined,
-                    }}
-                    render={({ field }) => (
-                      <CustomFieldInput
-                        customField={customField}
-                        required={required}
-                        field={field}
-                        themePreset={themePresetProps}
-                      />
-                    )}
-                  />
-                ),
-              )}
+              {checkout.attachedCustomFields &&
+                checkout.attachedCustomFields.map(
+                  ({ customField, required }) => (
+                    <FormField
+                      key={customField.id}
+                      control={control}
+                      name={`customFieldData.${customField.slug}`}
+                      rules={{
+                        required: required
+                          ? 'This field is required'
+                          : undefined,
+                      }}
+                      render={({ field }) => (
+                        <CustomFieldInput
+                          customField={customField}
+                          required={required}
+                          field={field}
+                          themePreset={themePresetProps}
+                        />
+                      )}
+                    />
+                  ),
+                )}
             </div>
             {!checkout.isFreeProductPrice && (
               <div className="flex flex-col gap-y-2">
@@ -693,32 +777,55 @@ const BaseCheckoutForm = ({
                         amount={checkout.amount}
                         currency={checkout.currency}
                         interval={interval}
+                        intervalCount={intervalCount}
                       />
                     </DetailRow>
+
                     {checkout.discount && (
-                      <DetailRow
-                        title={`${checkout.discount.name} (${getDiscountDisplay(checkout.discount)})`}
-                      >
-                        {formatCurrencyNumber(
-                          -checkout.discountAmount,
-                          checkout.currency,
-                        )}
-                      </DetailRow>
+                      <>
+                        <DetailRow
+                          title={`${checkout.discount.name} (${getDiscountDisplay(checkout.discount)})`}
+                        >
+                          {formatCurrencyNumber(
+                            -checkout.discountAmount,
+                            checkout.currency,
+                            checkout.discountAmount % 100 === 0 ? 0 : 2,
+                          )}
+                        </DetailRow>
+                        <DetailRow title="Taxable amount">
+                          {formatCurrencyNumber(
+                            checkout.netAmount,
+                            checkout.currency,
+                            checkout.netAmount % 100 === 0 ? 0 : 2,
+                          )}
+                        </DetailRow>
+                      </>
                     )}
-                    {checkout.taxAmount !== null && (
-                      <DetailRow title="Taxes">
-                        {formatCurrencyNumber(
-                          checkout.taxAmount,
-                          checkout.currency,
+
+                    <DetailRow title="Taxes">
+                      {checkout.taxAmount !== null
+                        ? formatCurrencyNumber(
+                            checkout.taxAmount,
+                            checkout.currency,
+                            checkout.taxAmount % 100 === 0 ? 0 : 2,
+                          )
+                        : '—'}
+                    </DetailRow>
+
+                    <DetailRow title={totalLabel} emphasis>
+                      <div className="flex flex-col items-end gap-y-1">
+                        <AmountLabel
+                          amount={checkout.totalAmount}
+                          currency={checkout.currency}
+                          interval={interval}
+                          intervalCount={intervalCount}
+                        />
+                        {formattedDiscountDuration && (
+                          <span className="text-xs font-normal text-gray-500">
+                            {formattedDiscountDuration}
+                          </span>
                         )}
-                      </DetailRow>
-                    )}
-                    <DetailRow title="Total" emphasis>
-                      <AmountLabel
-                        amount={checkout.totalAmount}
-                        currency={checkout.currency}
-                        interval={interval}
-                      />
+                      </div>
                     </DetailRow>
                     {meteredPrices.length > 0 && (
                       <DetailRow title="Additional metered usage" emphasis />
@@ -735,6 +842,30 @@ const BaseCheckoutForm = ({
                 ) : (
                   <span>Free</span>
                 )}
+                {(checkout.trialEnd ||
+                  (checkout.activeTrialInterval &&
+                    checkout.activeTrialIntervalCount)) && (
+                  <div className="dark:border-polar-700 mt-3 border-t border-gray-300 pt-4">
+                    {checkout.activeTrialInterval &&
+                      checkout.activeTrialIntervalCount && (
+                        <DetailRow
+                          emphasis
+                          title={`${checkout.activeTrialIntervalCount} ${checkout.activeTrialInterval}${checkout.activeTrialIntervalCount > 1 ? 's' : ''} trial`}
+                        >
+                          <span>Free</span>
+                        </DetailRow>
+                      )}
+                    {checkout.trialEnd && (
+                      <span className="dark:text-polar-500 text-gray-500:w text-sm">
+                        Trial ends{' '}
+                        <FormattedDateTime
+                          datetime={checkout.trialEnd}
+                          resolution="day"
+                        />
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             <div className="flex w-full flex-col items-center justify-center gap-y-2">
@@ -742,19 +873,20 @@ const BaseCheckoutForm = ({
                 type="submit"
                 size="lg"
                 wrapperClassNames="text-base"
-                className={cn(themePresetProps.polar.button, 'w-full')}
-                disabled={disabled}
+                className={cn('w-full')}
+                disabled={disabled || isUpdatePending}
                 loading={loading}
               >
-                {!checkout.isPaymentFormRequired
-                  ? 'Submit'
-                  : interval
-                    ? 'Subscribe'
-                    : 'Pay'}
+                {checkoutLabel}
               </Button>
               {loading && loadingLabel && (
                 <p className="dark:text-polar-500 text-sm text-gray-500">
                   {loadingLabel}
+                </p>
+              )}
+              {disabled && !loading && (
+                <p className="text-sm text-red-500 dark:text-red-500">
+                  Payments are currently unavailable
                 </p>
               )}
               {errors.root && (
@@ -793,6 +925,8 @@ interface CheckoutFormProps {
   ) => Promise<CheckoutPublicConfirmed>
   loading: boolean
   loadingLabel: string | undefined
+  disabled?: boolean
+  isUpdatePending?: boolean
   theme?: 'light' | 'dark'
   themePreset: ThemingPresetProps
 }
@@ -804,6 +938,8 @@ const StripeCheckoutForm = (props: CheckoutFormProps) => {
     confirm,
     loading,
     loadingLabel,
+    disabled,
+    isUpdatePending,
     themePreset: themePresetProps,
   } = props
   const {
@@ -825,14 +961,14 @@ const StripeCheckoutForm = (props: CheckoutFormProps) => {
         setupFutureUsage: 'off_session',
         paymentMethodCreation: 'manual',
         amount: checkout.totalAmount,
-        currency: checkout.currency || 'usd',
+        currency: checkout.currency,
       }
     } else if (checkout.isPaymentRequired && checkout.totalAmount) {
       return {
         mode: 'payment',
         paymentMethodCreation: 'manual',
         amount: checkout.totalAmount,
-        currency: checkout.currency || 'usd',
+        currency: checkout.currency,
       }
     }
 
@@ -840,7 +976,7 @@ const StripeCheckoutForm = (props: CheckoutFormProps) => {
       mode: 'setup',
       paymentMethodCreation: 'manual',
       setupFutureUsage: 'off_session',
-      currency: checkout.currency || 'usd',
+      currency: checkout.currency,
     }
   }, [checkout])
 
@@ -849,6 +985,7 @@ const StripeCheckoutForm = (props: CheckoutFormProps) => {
       stripe={stripePromise}
       options={{
         ...elementsOptions,
+        locale: 'en',
         customerSessionClientSecret: (
           checkout.paymentProcessorMetadata as {
             customer_session_client_secret?: string
@@ -866,6 +1003,7 @@ const StripeCheckoutForm = (props: CheckoutFormProps) => {
             update={update}
             loading={loading}
             loadingLabel={loadingLabel}
+            isUpdatePending={isUpdatePending}
           >
             {checkout.isPaymentFormRequired && (
               <PaymentElement
@@ -890,7 +1028,7 @@ const StripeCheckoutForm = (props: CheckoutFormProps) => {
 }
 
 const DummyCheckoutForm = (props: CheckoutFormProps) => {
-  const { checkout } = props
+  const { checkout, disabled } = props
   return (
     <BaseCheckoutForm
       {...props}
@@ -900,7 +1038,7 @@ const DummyCheckoutForm = (props: CheckoutFormProps) => {
         customerSessionToken: '',
       })}
       update={async () => checkout}
-      disabled={true}
+      disabled={disabled ?? true}
     />
   )
 }

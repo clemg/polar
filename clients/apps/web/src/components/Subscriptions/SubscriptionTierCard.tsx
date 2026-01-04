@@ -39,12 +39,12 @@ const SubscriptionTierCard: React.FC<SubscriptionTierCardProps> = ({
     <Card
       id={subscriptionTier.name}
       className={twMerge(
-        'dark:bg-polar-900 rounded-4xl relative flex flex-col gap-y-6 overflow-hidden border-none border-gray-200 bg-gray-100 transition-opacity hover:bg-gray-50 hover:opacity-50',
+        'dark:bg-polar-900 relative flex flex-col gap-y-6 overflow-hidden rounded-4xl border-none border-gray-200 bg-gray-100 transition-opacity hover:bg-gray-50 hover:opacity-50',
         className,
       )}
     >
       <CardHeader className="flex grow gap-y-6 p-8 pb-0">
-        <h3 className={twMerge('text-2xl')}>{subscriptionTier.name}</h3>
+        <h3 className="text-2xl">{subscriptionTier.name}</h3>
       </CardHeader>
       <CardContent
         className={twMerge(
@@ -79,11 +79,7 @@ const SubscriptionTierCard: React.FC<SubscriptionTierCardProps> = ({
           )}
         </div>
         {subscriptionTier.description && (
-          <div
-            className={twMerge(
-              'prose dark:prose-invert dark:text-polar-500 flex-shrink leading-normal text-gray-500',
-            )}
-          >
+          <div className="prose dark:prose-invert dark:text-polar-500 shrink leading-normal text-gray-500">
             <Markdown options={markdownOptionsJustText}>
               {subscriptionTier.description}
             </Markdown>

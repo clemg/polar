@@ -29,12 +29,15 @@ export const SubscribersWidget = ({ className }: SubscribersWidgetProps) => {
     interval: 'month',
     startDate,
     endDate: new Date(),
+    metrics: ['active_subscriptions'],
   })
 
   const maxPeriod =
     subscriberMetrics.data?.periods.reduce(
       (acc, curr) =>
-        curr.active_subscriptions > acc ? curr.active_subscriptions : acc,
+        (curr.active_subscriptions ?? 0) > acc
+          ? (curr.active_subscriptions ?? 0)
+          : acc,
       0,
     ) ?? 0
 
@@ -62,7 +65,7 @@ export const SubscribersWidget = ({ className }: SubscribersWidgetProps) => {
           {subscriberMetrics.data?.periods.map((period, i) => {
             const activeClass =
               i === subscriberMetrics.data.periods.length - 1
-                ? 'bg-blue-500 dark:bg-blue-500'
+                ? 'bg-blue dark:bg-blue'
                 : 'hover:bg-blue-100 dark:hover:bg-blue-900'
 
             const tooltipContent = `${period.active_subscriptions} in ${period.timestamp.toLocaleDateString(
@@ -78,12 +81,13 @@ export const SubscribersWidget = ({ className }: SubscribersWidgetProps) => {
                 <TooltipTrigger
                   style={{
                     height: `${Math.max(
-                      (period.active_subscriptions / maxPeriod) * 100 || 0,
+                      ((period.active_subscriptions ?? 0) / maxPeriod) * 100 ||
+                        0,
                       8,
                     )}%`,
                   }}
                   className={twMerge(
-                    'dark:bg-polar-700 w-3 flex-shrink rounded-full bg-gray-300',
+                    'dark:bg-polar-700 w-3 shrink rounded-full bg-gray-300',
                     activeClass,
                   )}
                 />

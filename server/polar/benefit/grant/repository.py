@@ -9,13 +9,25 @@ from polar.kit.repository import (
     RepositoryBase,
     RepositorySoftDeletionIDMixin,
     RepositorySoftDeletionMixin,
+    RepositorySortingMixin,
+    SortingClause,
 )
-from polar.models import Benefit, BenefitGrant, Customer, Product, ProductBenefit
+from polar.models import (
+    Benefit,
+    BenefitGrant,
+    Customer,
+    Member,
+    Product,
+    ProductBenefit,
+)
 from polar.models.benefit import BenefitType
 from polar.models.benefit_grant import BenefitGrantScope
 
+from .sorting import BenefitGrantSortProperty
+
 
 class BenefitGrantRepository(
+    RepositorySortingMixin[BenefitGrant, BenefitGrantSortProperty],
     RepositorySoftDeletionIDMixin[BenefitGrant, UUID],
     RepositorySoftDeletionMixin[BenefitGrant],
     RepositoryBase[BenefitGrant],
@@ -23,11 +35,16 @@ class BenefitGrantRepository(
     model = BenefitGrant
 
     async def get_by_benefit_and_scope(
-        self, customer: Customer, benefit: Benefit, **scope: Unpack[BenefitGrantScope]
+        self,
+        customer: Customer,
+        benefit: Benefit,
+        member: Member | None = None,
+        **scope: Unpack[BenefitGrantScope],
     ) -> BenefitGrant | None:
         statement = self.get_base_statement().where(
             BenefitGrant.customer_id == customer.id,
             BenefitGrant.benefit_id == benefit.id,
+            BenefitGrant.member_id == (member.id if member else None),
             BenefitGrant.deleted_at.is_(None),
             BenefitGrant.scope == scope,
         )
@@ -113,6 +130,18 @@ class BenefitGrantRepository(
         ).options(*options)
         return await self.get_all(statement)
 
+    async def list_by_customer_and_scope(
+        self,
+        customer: Customer,
+        **scope: Unpack[BenefitGrantScope],
+    ) -> Sequence[BenefitGrant]:
+        statement = self.get_base_statement().where(
+            BenefitGrant.customer_id == customer.id,
+            BenefitGrant.scope == scope,
+            BenefitGrant.deleted_at.is_(None),
+        )
+        return await self.get_all(statement)
+
     async def list_outdated_grants(
         self, product: Product, **scope: Unpack[BenefitGrantScope]
     ) -> Sequence[BenefitGrant]:
@@ -128,3 +157,12 @@ class BenefitGrantRepository(
             BenefitGrant.deleted_at.is_(None),
         )
         return await self.get_all(statement)
+
+    def get_sorting_clause(self, property: BenefitGrantSortProperty) -> SortingClause:
+        match property:
+            case BenefitGrantSortProperty.created_at:
+                return BenefitGrant.created_at
+            case BenefitGrantSortProperty.granted_at:
+                return BenefitGrant.granted_at
+            case BenefitGrantSortProperty.revoked_at:
+                return BenefitGrant.revoked_at

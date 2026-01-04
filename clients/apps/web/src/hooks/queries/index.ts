@@ -1,4 +1,4 @@
-import { queryClient } from '@/utils/api/query'
+import { getQueryClient } from '@/utils/api/query'
 import { api } from '@/utils/client'
 import { unwrap } from '@polar-sh/client'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -19,9 +19,11 @@ export * from './metrics'
 export * from './org'
 export * from './products'
 export * from './refunds'
+export * from './seats'
 export * from './subscriptions'
 export * from './transactions'
 export * from './user'
+export * from './wallets'
 export * from './webhooks'
 
 export const useAccount = (id?: string | null) =>
@@ -55,6 +57,6 @@ export const useNotificationsMarkRead = () =>
       if (result.error) {
         return
       }
-      queryClient.invalidateQueries({ queryKey: ['notifications'] })
+      getQueryClient().invalidateQueries({ queryKey: ['notifications'] })
     },
   })

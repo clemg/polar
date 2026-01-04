@@ -13,7 +13,6 @@ import ShadowBox from '@polar-sh/ui/components/atoms/ShadowBox'
 import Markdown from 'markdown-to-jsx'
 import { usePathname } from 'next/navigation'
 import { useCallback, useMemo, useState } from 'react'
-import { twMerge } from 'tailwind-merge'
 import DownloadablesBenefitGrant from './Downloadables/DownloadablesBenefitGrant'
 import { LicenseKeyBenefitGrant } from './LicenseKeys/LicenseKeyBenefitGrant'
 import { benefitsDisplayNames, resolveBenefitIcon } from './utils'
@@ -70,6 +69,8 @@ const BenefitGrantOAuth = ({
     properties: { account_id },
     benefit: { type: benefitType },
   } = benefitGrant
+  const [showAccountSelector, setShowAccountSelector] = useState(!account_id)
+
   const accounts = useMemo(
     () =>
       customer
@@ -102,6 +103,20 @@ const BenefitGrantOAuth = ({
   const [selectedAccountKey, setSelectedAccountKey] = useState<
     string | undefined
   >(undefined)
+
+  const onAccountReset = useCallback(async () => {
+    await updateBenefitGrant.mutateAsync({
+      id: benefitGrant.id,
+      body: {
+        benefit_type: benefitType,
+        properties: {
+          account_id: null,
+        },
+      },
+    })
+    setShowAccountSelector(true)
+  }, [updateBenefitGrant, benefitGrant.id, benefitType])
+
   const onAccountSubmit = useCallback(async () => {
     if (!selectedAccountKey) {
       return
@@ -115,19 +130,34 @@ const BenefitGrantOAuth = ({
         },
       },
     })
+    setShowAccountSelector(false)
   }, [updateBenefitGrant, selectedAccountKey, benefitGrant.id, benefitType])
 
   return (
     <ShadowBox className="dark:bg-polar-800 bg-white p-4 text-sm lg:rounded-3xl">
-      <div className="flex flex-row gap-2">
-        {account_id && (
-          <a href={openButtonUrl} target="_blank" rel="noopener noreferrer">
-            <Button asChild fullWidth>
-              {openButtonText}
+      <div className="flex flex-col gap-2 lg:flex-row">
+        {!showAccountSelector && (
+          <>
+            <a
+              href={openButtonUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="grow"
+            >
+              <Button asChild fullWidth>
+                {openButtonText}
+              </Button>
+            </a>
+            <Button
+              onClick={onAccountReset}
+              variant="secondary"
+              className="grow"
+            >
+              Request new invite
             </Button>
-          </a>
+          </>
         )}
-        {!account_id && (
+        {showAccountSelector && (
           <>
             {accounts.length === 0 ? (
               <Button type="button" onClick={authorize} fullWidth>
@@ -225,7 +255,7 @@ export const BenefitGrant = ({ api, benefitGrant }: BenefitGrantProps) => {
   const { benefit } = benefitGrant
 
   return (
-    <div className={twMerge('flex w-full flex-col gap-4')}>
+    <div className="flex w-full flex-col gap-4">
       <div className="flex flex-row items-center gap-x-4">
         <div className="flex flex-row items-center gap-x-2 text-xs text-blue-500 dark:text-white">
           <span className="dark:bg-polar-700 flex h-8 w-8 flex-row items-center justify-center rounded-full bg-blue-50 text-sm">
@@ -233,9 +263,7 @@ export const BenefitGrant = ({ api, benefitGrant }: BenefitGrantProps) => {
           </span>
         </div>
         <div className="flex flex-col">
-          <h3 className="text-sm font-medium capitalize">
-            {benefit.description}
-          </h3>
+          <h3 className="text-sm font-medium">{benefit.description}</h3>
           <p className="dark:text-polar-500 flex flex-row gap-x-1 truncate text-sm text-gray-500">
             {benefitsDisplayNames[benefit.type]}
           </p>

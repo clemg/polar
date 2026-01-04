@@ -23,11 +23,12 @@ class Metric(Schema):
 if TYPE_CHECKING:
 
     class Metrics(Schema):
-        def __getattr__(self, name: str) -> Metric: ...
+        def __getattr__(self, name: str) -> Metric | None: ...
 
 else:
+    # Metrics fields are optional to support metrics filtering
     Metrics = create_model(
-        "Metrics", **{m.slug: (Metric, ...) for m in METRICS}, __base__=Schema
+        "Metrics", **{m.slug: (Metric | None, None) for m in METRICS}, __base__=Schema
     )
 
 
@@ -44,12 +45,13 @@ class MetricsPeriodBase(Schema):
 if TYPE_CHECKING:
 
     class MetricsPeriod(MetricsPeriodBase):
-        def __getattr__(self, name: str) -> int | float: ...
+        def __getattr__(self, name: str) -> int | float | None: ...
 
 else:
+    # Metric fields are nullable to support metrics filtering with exclude_none
     MetricsPeriod = create_model(
         "MetricPeriod",
-        **{m.slug: (int | float, ...) for m in METRICS},
+        **{m.slug: (int | float | None, None) for m in METRICS},
         __base__=MetricsPeriodBase,
     )
 
@@ -66,13 +68,14 @@ class MetricsTotalsBase(Schema):
 if TYPE_CHECKING:
 
     class MetricsTotals(MetricsTotalsBase):
-        def __getattr__(self, name: str) -> int | float: ...
+        def __getattr__(self, name: str) -> int | float | None: ...
 
 
 else:
+    # Metric fields are nullable to support metrics filtering with exclude_none
     MetricsTotals = create_model(
         "MetricsTotals",
-        **{m.slug: (int | float, ...) for m in METRICS},
+        **{m.slug: (int | float | None, None) for m in METRICS},
         __base__=MetricsTotalsBase,
     )
 
@@ -88,6 +91,7 @@ class MetricsResponse(Schema):
 class MetricsIntervalLimit(Schema):
     """Date interval limit to get metrics for a given interval."""
 
+    min_days: int = Field(description="Minimum number of days for this interval.")
     max_days: int = Field(description="Maximum number of days for this interval.")
 
 

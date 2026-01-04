@@ -14,20 +14,33 @@ from polar.locker import Locker, get_locker
 from polar.models import Subscription
 from polar.openapi import APITag
 from polar.organization.schemas import OrganizationID
-from polar.postgres import AsyncSession, get_db_session
+from polar.postgres import (
+    AsyncReadSession,
+    AsyncSession,
+    get_db_read_session,
+    get_db_session,
+)
 from polar.product.schemas import ProductID
 from polar.routing import APIRouter
 
 from . import auth, sorting
 from .schemas import Subscription as SubscriptionSchema
-from .schemas import SubscriptionID, SubscriptionUpdate
-from .service import AlreadyCanceledSubscription
+from .schemas import (
+    SubscriptionChargePreview,
+    SubscriptionCreate,
+    SubscriptionID,
+    SubscriptionUpdate,
+)
+from .service import (
+    AlreadyCanceledSubscription,
+    SubscriptionLocked,
+)
 from .service import subscription as subscription_service
 
 log = structlog.get_logger()
 
 router = APIRouter(
-    prefix="/subscriptions", tags=["subscriptions", APITag.documented, APITag.mcp]
+    prefix="/subscriptions", tags=["subscriptions", APITag.public, APITag.mcp]
 )
 
 SubscriptionNotFound = {
@@ -67,7 +80,11 @@ async def list(
     active: bool | None = Query(
         None, description="Filter by active or inactive subscription."
     ),
-    session: AsyncSession = Depends(get_db_session),
+    cancel_at_period_end: bool | None = Query(
+        None,
+        description="Filter by subscriptions that are set to cancel at period end.",
+    ),
+    session: AsyncReadSession = Depends(get_db_read_session),
 ) -> ListResource[SubscriptionSchema]:
     """List subscriptions."""
     results, count = await subscription_service.list(
@@ -79,6 +96,7 @@ async def list(
         external_customer_id=external_customer_id,
         discount_id=discount_id,
         active=active,
+        cancel_at_period_end=cancel_at_period_end,
         metadata=metadata,
         pagination=pagination,
         sorting=sorting,
@@ -97,7 +115,7 @@ async def export(
     organization_id: MultipleQueryFilter[OrganizationID] | None = Query(
         None, description="Filter by organization ID."
     ),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncReadSession = Depends(get_db_read_session),
 ) -> Response:
     """Export subscriptions as a CSV file."""
 
@@ -152,8 +170,8 @@ async def export(
 )
 async def get(
     id: SubscriptionID,
-    auth_subject: auth.SubscriptionsWrite,
-    session: AsyncSession = Depends(get_db_session),
+    auth_subject: auth.SubscriptionsRead,
+    session: AsyncReadSession = Depends(get_db_read_session),
 ) -> Subscription:
     """Get a subscription by ID."""
     subscription = await subscription_service.get(session, auth_subject, id)
@@ -162,6 +180,73 @@ async def get(
         raise ResourceNotFound()
 
     return subscription
+
+
+@router.get(
+    "/{id}/charge-preview",
+    summary="Preview Next Charge For Subscription",
+    response_model=SubscriptionChargePreview,
+    responses={404: SubscriptionNotFound},
+    tags=[APITag.private],
+)
+async def get_charge_preview(
+    id: SubscriptionID,
+    auth_subject: auth.SubscriptionsRead,
+    session: AsyncSession = Depends(get_db_session),
+) -> SubscriptionChargePreview:
+    """
+    Get a preview of the next charge for an active or trialing subscription.
+
+    Returns a breakdown of:
+    - Base subscription amount
+    - Metered usage charges
+    - Applied discounts
+    - Calculated taxes
+    - Total amount
+
+    For trialing subscriptions, shows what the first charge will be when the trial ends.
+    For subscriptions set to cancel at period end, shows the final charge.
+    Only available for active or trialing subscriptions, including those set to cancel.
+    """
+    subscription = await subscription_service.get(session, auth_subject, id)
+
+    if subscription is None:
+        raise ResourceNotFound()
+
+    # Allow active, trialing, and subscriptions set to cancel at period end
+    if subscription.status not in ("active", "trialing"):
+        raise ResourceNotFound()
+
+    # If subscription will end (cancel_at_period_end or ends_at), ensure there's still a charge coming
+    if subscription.cancel_at_period_end or subscription.ends_at:
+        # Only show preview if we haven't reached the end date yet
+        if subscription.ended_at:
+            raise ResourceNotFound()
+
+    return await subscription_service.calculate_charge_preview(session, subscription)
+
+
+@router.post(
+    "/",
+    response_model=SubscriptionSchema,
+    status_code=201,
+    summary="Create Subscription",
+    responses={201: {"description": "Subscription created."}},
+)
+async def create(
+    subscription_create: SubscriptionCreate,
+    auth_subject: auth.SubscriptionsWrite,
+    session: AsyncSession = Depends(get_db_session),
+) -> Subscription:
+    """
+    Create a subscription programmatically.
+
+    This endpoint only allows to create subscription on free products.
+    For paid products, use the checkout flow.
+
+    No initial order will be created and no confirmation email will be sent.
+    """
+    return await subscription_service.create(session, subscription_create, auth_subject)
 
 
 @router.patch(
@@ -177,6 +262,10 @@ async def get(
             "model": AlreadyCanceledSubscription.schema(),
         },
         404: SubscriptionNotFound,
+        409: {
+            "description": "Subscription is pending an update.",
+            "model": SubscriptionLocked.schema(),
+        },
     },
 )
 async def update(
@@ -197,9 +286,10 @@ async def update(
         customer_id=auth_subject.subject.id,
         updates=subscription_update,
     )
-    return await subscription_service.update(
-        session, locker, subscription, update=subscription_update
-    )
+    async with subscription_service.lock(locker, subscription):
+        return await subscription_service.update(
+            session, locker, subscription, update=subscription_update
+        )
 
 
 @router.delete(
@@ -213,6 +303,10 @@ async def update(
             "model": AlreadyCanceledSubscription.schema(),
         },
         404: SubscriptionNotFound,
+        409: {
+            "description": "Subscription is pending an update.",
+            "model": SubscriptionLocked.schema(),
+        },
     },
 )
 async def revoke(
@@ -229,8 +323,5 @@ async def revoke(
     log.info(
         "subscription.revoke", id=id, admin_id=auth_subject.subject.id, immediate=True
     )
-    return await subscription_service.revoke(
-        session,
-        locker=locker,
-        subscription=subscription,
-    )
+    async with subscription_service.lock(locker, subscription):
+        return await subscription_service.revoke(session, subscription)

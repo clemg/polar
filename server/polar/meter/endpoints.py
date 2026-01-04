@@ -7,10 +7,16 @@ from polar.kit.metadata import MetadataQuery, get_metadata_query_openapi_schema
 from polar.kit.pagination import ListResource, PaginationParamsQuery
 from polar.kit.schemas import MultipleQueryFilter
 from polar.kit.time_queries import MIN_DATETIME, TimeInterval, is_under_limits
+from polar.meter.aggregation import AggregationFunction
 from polar.models import Meter
 from polar.openapi import APITag
 from polar.organization.schemas import OrganizationID
-from polar.postgres import AsyncSession, get_db_session
+from polar.postgres import (
+    AsyncReadSession,
+    AsyncSession,
+    get_db_read_session,
+    get_db_session,
+)
 from polar.routing import APIRouter
 
 from . import auth, sorting
@@ -18,9 +24,7 @@ from .schemas import Meter as MeterSchema
 from .schemas import MeterCreate, MeterID, MeterQuantities, MeterUpdate
 from .service import meter as meter_service
 
-router = APIRouter(
-    prefix="/meters", tags=["meters", APITag.documented, APITag.featured]
-)
+router = APIRouter(prefix="/meters", tags=["meters", APITag.public])
 
 
 MeterNotFound = {
@@ -44,7 +48,8 @@ async def list(
         None, title="OrganizationID Filter", description="Filter by organization ID."
     ),
     query: str | None = Query(None, description="Filter by name."),
-    session: AsyncSession = Depends(get_db_session),
+    is_archived: bool | None = Query(None, description="Filter on archived meters."),
+    session: AsyncReadSession = Depends(get_db_read_session),
 ) -> ListResource[MeterSchema]:
     """List meters."""
     results, count = await meter_service.list(
@@ -53,6 +58,7 @@ async def list(
         organization_id=organization_id,
         metadata=metadata,
         query=query,
+        is_archived=is_archived,
         pagination=pagination,
         sorting=sorting,
     )
@@ -73,7 +79,7 @@ async def list(
 async def get(
     id: MeterID,
     auth_subject: auth.MeterRead,
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncReadSession = Depends(get_db_read_session),
 ) -> Meter:
     """Get a meter by ID."""
     meter = await meter_service.get(session, auth_subject, id)
@@ -110,7 +116,15 @@ async def quantities(
         title="ExternalCustomerID Filter",
         description="Filter by external customer ID.",
     ),
-    session: AsyncSession = Depends(get_db_session),
+    customer_aggregation_function: AggregationFunction | None = Query(
+        None,
+        description=(
+            "If set, will first compute the quantities per customer before aggregating "
+            "them using the given function. "
+            "If not set, the quantities will be aggregated across all events."
+        ),
+    ),
+    session: AsyncReadSession = Depends(get_db_read_session),
 ) -> MeterQuantities:
     """Get quantities of a meter over a time period."""
     meter = await meter_service.get(session, auth_subject, id)
@@ -142,6 +156,7 @@ async def quantities(
         customer_id=customer_id,
         external_customer_id=external_customer_id,
         metadata=metadata,
+        customer_aggregation_function=customer_aggregation_function,
     )
 
 

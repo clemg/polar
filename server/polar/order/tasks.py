@@ -1,26 +1,29 @@
 import uuid
 
+import stripe as stripe_lib
 import structlog
-from babel.numbers import format_currency
 from dramatiq import Retry
 from sqlalchemy.orm import joinedload
 
-from polar.config import settings
 from polar.exceptions import PolarTaskError
-from polar.integrations.discord.internal_webhook import (
-    get_branded_discord_embed,
-    send_internal_webhook,
-)
 from polar.logging import Logger
 from polar.models import Customer, Order
-from polar.models.order import OrderBillingReason
+from polar.models.order import OrderBillingReasonInternal
 from polar.payment_method.repository import PaymentMethodRepository
 from polar.product.repository import ProductRepository
 from polar.subscription.repository import SubscriptionRepository
 from polar.transaction.service.balance import PaymentTransactionForChargeDoesNotExist
-from polar.worker import AsyncSessionMaker, TaskPriority, actor, can_retry
+from polar.worker import (
+    AsyncSessionMaker,
+    CronTrigger,
+    TaskPriority,
+    actor,
+    can_retry,
+    enqueue_job,
+)
 
 from .repository import OrderRepository
+from .service import CardPaymentFailed, NoPendingBillingEntries
 from .service import order as order_service
 
 log: Logger = structlog.get_logger()
@@ -52,15 +55,10 @@ class OrderDoesNotExist(OrderTaskError):
         super().__init__(message)
 
 
-class PaymentMethodDoesNotExist(OrderTaskError):
-    def __init__(self, payment_method_id: uuid.UUID) -> None:
-        self.payment_method_id = payment_method_id
-        message = f"The payment method with id {payment_method_id} does not exist."
-        super().__init__(message)
-
-
-@actor(actor_name="order.subscription_cycle", priority=TaskPriority.LOW)
-async def create_subscription_cycle_order(subscription_id: uuid.UUID) -> None:
+@actor(actor_name="order.create_subscription_order", priority=TaskPriority.LOW)
+async def create_subscription_order(
+    subscription_id: uuid.UUID, order_reason: OrderBillingReasonInternal
+) -> None:
     async with AsyncSessionMaker() as session:
         repository = SubscriptionRepository.from_session(session)
         subscription = await repository.get_by_id(
@@ -69,9 +67,14 @@ async def create_subscription_cycle_order(subscription_id: uuid.UUID) -> None:
         if subscription is None:
             raise SubscriptionDoesNotExist(subscription_id)
 
-        await order_service.create_subscription_order(
-            session, subscription, OrderBillingReason.subscription_cycle
-        )
+        try:
+            await order_service.create_subscription_order(
+                session, subscription, order_reason
+            )
+        except NoPendingBillingEntries:
+            # Skip creating an order if there are no pending billing entries.
+            # Usually happens if the subscription is now canceled, and no usage-based billing is pending
+            pass
 
 
 @actor(actor_name="order.trigger_payment", priority=TaskPriority.LOW)
@@ -89,9 +92,40 @@ async def trigger_payment(order_id: uuid.UUID, payment_method_id: uuid.UUID) -> 
             payment_method_id, order.customer_id
         )
         if payment_method is None:
-            raise PaymentMethodDoesNotExist(payment_method_id)
+            log.info(
+                "Payment method not found, triggering dunning process",
+                order_id=order_id,
+                payment_method_id=payment_method_id,
+            )
+            await order_service.handle_payment_failure(session, order)
+            return
 
-        await order_service.trigger_payment(session, order, payment_method)
+        try:
+            await order_service.trigger_payment(session, order, payment_method)
+        except CardPaymentFailed:
+            # Card errors should not be retried - they will be handled by the dunning process
+            # Log the failure but don't retry the task
+            log.info(
+                "Card payment failed, not retrying - will be handled by dunning",
+                order_id=order_id,
+            )
+            return
+        except (
+            stripe_lib.APIConnectionError,
+            stripe_lib.APIError,
+            stripe_lib.RateLimitError,
+        ) as e:
+            # Network/availability errors should be retried
+            log.error(
+                "Stripe service error during payment trigger, retrying",
+                order_id=order_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
+            if can_retry():
+                raise Retry() from e
+            else:
+                raise
 
 
 @actor(actor_name="order.balance", priority=TaskPriority.LOW)
@@ -129,67 +163,17 @@ async def update_product_benefits_grants(product_id: uuid.UUID) -> None:
         await order_service.update_product_benefits_grants(session, product)
 
 
-@actor(actor_name="order.discord_notification", priority=TaskPriority.LOW)
-async def order_discord_notification(order_id: uuid.UUID) -> None:
+@actor(actor_name="order.confirmation_email", priority=TaskPriority.LOW)
+async def order_confirmation_email(order_id: uuid.UUID) -> None:
     async with AsyncSessionMaker() as session:
-        order_repository = OrderRepository.from_session(session)
-        order = await order_repository.get_by_id(
-            order_id, options=order_repository.get_eager_options()
+        repository = OrderRepository.from_session(session)
+        order = await repository.get_by_id(
+            order_id, options=repository.get_eager_options()
         )
         if order is None:
             raise OrderDoesNotExist(order_id)
 
-        if order.billing_reason not in {
-            OrderBillingReason.purchase,
-            OrderBillingReason.subscription_create,
-        }:
-            return
-
-        product = order.product
-        customer = order.customer
-        organization = order.customer.organization
-        subscription = order.subscription
-
-        amount = format_currency(order.net_amount / 100, "USD", locale="en_US")
-        if subscription:
-            amount = f"{amount} / {subscription.recurring_interval}"
-
-        if order.billing_reason == OrderBillingReason.subscription_create:
-            description = "New subscription"
-        else:
-            description = "One-time purchase"
-
-        await send_internal_webhook(
-            {
-                "content": "New order",
-                "embeds": [
-                    get_branded_discord_embed(
-                        {
-                            "title": product.name,
-                            "description": description,
-                            "fields": [
-                                {
-                                    "name": "Organization",
-                                    "value": f"[{organization.name}]({
-                                        settings.generate_external_url(
-                                            f'/backoffice/organizations/{organization.id}'
-                                        )
-                                    })",
-                                },
-                                {
-                                    "name": "Amount",
-                                    "value": amount,
-                                },
-                                {
-                                    "name": "Customer",
-                                    "value": customer.email,
-                                },
-                            ],
-                        }
-                    )
-                ],
-            }
-        )
+        await order_service.send_confirmation_email(session, order)
 
 
 @actor(actor_name="order.invoice", priority=TaskPriority.LOW)
@@ -203,3 +187,32 @@ async def order_invoice(order_id: uuid.UUID) -> None:
             raise OrderDoesNotExist(order_id)
 
         await order_service.generate_invoice(session, order)
+
+
+@actor(
+    actor_name="order.process_dunning",
+    cron_trigger=CronTrigger.from_crontab("0 * * * *"),
+    priority=TaskPriority.MEDIUM,
+)
+async def process_dunning() -> None:
+    """Process all orders that are due for dunning (payment retry)."""
+    async with AsyncSessionMaker() as session:
+        order_repository = OrderRepository.from_session(session)
+        due_orders = await order_repository.get_due_dunning_orders()
+
+    for order in due_orders:
+        enqueue_job("order.process_dunning_order", order.id)
+
+
+@actor(actor_name="order.process_dunning_order", priority=TaskPriority.MEDIUM)
+async def process_dunning_order(order_id: uuid.UUID) -> None:
+    """Process a single order due for dunning (payment retry)."""
+    async with AsyncSessionMaker() as session:
+        order_repository = OrderRepository.from_session(session)
+        order = await order_repository.get_by_id(
+            order_id, options=order_repository.get_eager_options()
+        )
+        if order is None:
+            raise OrderDoesNotExist(order_id)
+
+        await order_service.process_dunning_order(session, order)

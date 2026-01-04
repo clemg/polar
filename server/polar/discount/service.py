@@ -3,12 +3,12 @@ import uuid
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
+import structlog
 from sqlalchemy import Select, UnaryExpression, asc, delete, desc, func, or_, select
 from sqlalchemy.orm import joinedload
 
 from polar.auth.models import AuthSubject, is_organization, is_user
 from polar.exceptions import PolarError, PolarRequestValidationError
-from polar.integrations.stripe.service import stripe as stripe_service
 from polar.kit.pagination import PaginationParams, paginate
 from polar.kit.services import ResourceServiceReader
 from polar.kit.sorting import Sorting
@@ -23,6 +23,7 @@ from polar.models import (
     UserOrganization,
 )
 from polar.models.checkout import Checkout
+from polar.models.discount import DiscountFixed
 from polar.models.discount_redemption import DiscountRedemption
 from polar.organization.resolver import get_payload_organization
 from polar.postgres import AsyncSession
@@ -30,6 +31,8 @@ from polar.product.repository import ProductRepository
 
 from .schemas import DiscountCreate, DiscountUpdate
 from .sorting import DiscountSortProperty
+
+log = structlog.get_logger()
 
 
 class DiscountError(PolarError): ...
@@ -153,11 +156,6 @@ class DiscountService(ResourceServiceReader[Discount]):
             discount_redemptions=[],
             redemptions_count=0,
         )
-        stripe_coupon = await stripe_service.create_coupon(
-            **discount.get_stripe_coupon_params()
-        )
-        discount.stripe_coupon_id = stripe_coupon.id
-
         session.add(discount)
 
         return discount
@@ -195,8 +193,28 @@ class DiscountService(ResourceServiceReader[Discount]):
                 ]
             )
 
+        if discount_update.code is not None:
+            existing_discount = await self.get_by_code_and_organization(
+                session, discount_update.code, discount.organization, redeemable=False
+            )
+            if existing_discount is not None and existing_discount.id != discount.id:
+                raise PolarRequestValidationError(
+                    [
+                        {
+                            "type": "value_error",
+                            "loc": ("body", "code"),
+                            "msg": "Discount with this code already exists.",
+                            "input": discount_update.code,
+                        }
+                    ]
+                )
+
         if discount.redemptions_count > 0:
-            forbidden_fields = {"amount", "currency", "basis_points"}
+            forbidden_fields = (
+                {"amount", "currency"}
+                if isinstance(discount, DiscountFixed)
+                else {"basis_points"}
+            )
             for field in forbidden_fields:
                 discount_update_value = getattr(discount_update, field, None)
                 if (
@@ -242,43 +260,18 @@ class DiscountService(ResourceServiceReader[Discount]):
                 discount.discount_products.append(DiscountProduct(product=product))
 
         updated_fields = set()
+        exclude = {"products"}
+        if isinstance(discount, DiscountFixed):
+            exclude.add("basis_points")
+        else:
+            exclude.add("amount")
+            exclude.add("currency")
         for attr, value in discount_update.model_dump(
-            exclude_unset=True, exclude={"products"}, by_alias=True
+            exclude_unset=True, exclude=exclude, by_alias=True
         ).items():
             if value != getattr(discount, attr):
                 setattr(discount, attr, value)
                 updated_fields.add(attr)
-
-        sensitive_fields = {
-            "starts_at",
-            "ends_at",
-            "max_redemptions",
-            "amount",
-            "currency",
-            "basis_points",
-            "duration_in_months",
-        }
-        if sensitive_fields.intersection(updated_fields):
-            if discount.ends_at is not None and discount.ends_at < utc_now():
-                raise PolarRequestValidationError(
-                    [
-                        {
-                            "type": "value_error",
-                            "loc": ("body", "ends_at"),
-                            "msg": "Ends at must be in the future.",
-                            "input": discount.ends_at,
-                        }
-                    ]
-                )
-            new_stripe_coupon = await stripe_service.create_coupon(
-                **discount.get_stripe_coupon_params()
-            )
-            await stripe_service.delete_coupon(discount.stripe_coupon_id)
-            discount.stripe_coupon_id = new_stripe_coupon.id
-        elif "name" in updated_fields:
-            await stripe_service.update_coupon(
-                discount.stripe_coupon_id, name=discount.name
-            )
 
         session.add(discount)
         await session.flush()
@@ -288,9 +281,6 @@ class DiscountService(ResourceServiceReader[Discount]):
 
     async def delete(self, session: AsyncSession, discount: Discount) -> Discount:
         discount.set_deleted_at()
-
-        await stripe_service.delete_coupon(discount.stripe_coupon_id)
-
         session.add(discount)
         return discount
 
@@ -352,12 +342,13 @@ class DiscountService(ResourceServiceReader[Discount]):
         self,
         session: AsyncSession,
         code: str,
+        organization: Organization,
         product: Product,
         *,
         redeemable: bool = True,
     ) -> Discount | None:
         discount = await self.get_by_code_and_organization(
-            session, code, product.organization, redeemable=redeemable
+            session, code, organization, redeemable=redeemable
         )
 
         if discount is None:
@@ -367,15 +358,6 @@ class DiscountService(ResourceServiceReader[Discount]):
             return None
 
         return discount
-
-    async def get_by_stripe_coupon_id(
-        self, session: AsyncSession, stripe_coupon_id: str
-    ) -> Discount | None:
-        statement = select(Discount).where(
-            Discount.stripe_coupon_id == stripe_coupon_id
-        )
-        result = await session.execute(statement)
-        return result.scalar_one_or_none()
 
     async def is_redeemable_discount(
         self, session: AsyncSession, discount: Discount

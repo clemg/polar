@@ -3,8 +3,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, TypedDict
 from uuid import UUID
 
-from annotated_types import Ge, Len
-from pydantic import Field
+from annotated_types import Ge, Le, Len, MinLen
+from pydantic import AfterValidator, Field, ValidationInfo
 from sqlalchemy import ForeignKey, String, UniqueConstraint, Uuid
 from sqlalchemy.dialects.postgresql import CITEXT, JSONB
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
@@ -14,6 +14,9 @@ from polar.kit.metadata import MetadataMixin
 
 if TYPE_CHECKING:
     from polar.models import Organization
+
+INT32_MIN = -(2**31)
+INT32_MAX = 2**31 - 1
 
 
 class CustomFieldType(StrEnum):
@@ -33,8 +36,20 @@ class CustomFieldType(StrEnum):
         }[self]
 
 
-PositiveInt = Annotated[int, Ge(0)]
+PositiveBoundedInt = Annotated[int, Ge(0), Le(INT32_MAX)]
+BoundedInt = Annotated[int, Ge(INT32_MIN), Le(INT32_MAX)]
 NonEmptyString = Annotated[str, Len(min_length=1)]
+
+
+def validate_ge_le(v: int, info: ValidationInfo) -> int:
+    """Validate that le is greater than or equal to ge when both are provided."""
+    ge = info.data.get("ge")
+    if ge is not None and v is not None and ge > v:
+        raise ValueError(
+            "Greater than or equal (ge) must be less than or equal to "
+            "Less than or equal (le)"
+        )
+    return v
 
 
 class CustomFieldProperties(TypedDict):
@@ -45,13 +60,13 @@ class CustomFieldProperties(TypedDict):
 
 class CustomFieldTextProperties(CustomFieldProperties):
     textarea: NotRequired[bool]
-    min_length: NotRequired[PositiveInt]
-    max_length: NotRequired[PositiveInt]
+    min_length: NotRequired[PositiveBoundedInt]
+    max_length: NotRequired[PositiveBoundedInt]
 
 
 class ComparableProperties(TypedDict):
-    ge: NotRequired[int]
-    le: NotRequired[int]
+    ge: NotRequired[BoundedInt]
+    le: NotRequired[Annotated[BoundedInt, AfterValidator(validate_ge_le)]]
 
 
 class CustomFieldNumberProperties(CustomFieldProperties, ComparableProperties):
@@ -72,7 +87,7 @@ class CustomFieldSelectOption(TypedDict):
 
 
 class CustomFieldSelectProperties(CustomFieldProperties):
-    options: list[CustomFieldSelectOption]
+    options: Annotated[list[CustomFieldSelectOption], MinLen(1)]
 
 
 class CustomField(MetadataMixin, RecordModel):
@@ -149,12 +164,14 @@ class CustomFieldNumber(CustomField):
     }
 
     def get_field_definition(self, required: bool) -> tuple[Any, Any]:
+        ge = self.properties.get("ge")
+        le = self.properties.get("le")
         return (
             int if required else int | None,
             Field(
                 default=None if not required else ...,
-                ge=self.properties.get("ge"),
-                le=self.properties.get("le"),
+                ge=ge if ge is not None else INT32_MIN,
+                le=le if le is not None else INT32_MAX,
             ),
         )
 

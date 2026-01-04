@@ -10,10 +10,16 @@ Sentry.init({
   environment: CONFIG.ENVIRONMENT,
 
   // Add optional integrations for additional features
-  integrations: [Sentry.httpClientIntegration()],
+  integrations: [
+    Sentry.httpClientIntegration(),
+    Sentry.browserTracingIntegration(),
+  ],
 
   // Define how likely traces are sampled. Adjust this value in production, or use tracesSampler for greater control.
-  tracesSampleRate: 0,
+  tracesSampleRate: 0.1,
+
+  // Enable distributed tracing to API
+  tracePropagationTargets: [/^https:\/\/api\.polar\.sh/],
 
   // Define how likely Replay events are sampled.
   // This sets the sample rate to be 10%. You may want this to be 100% while
@@ -27,6 +33,18 @@ Sentry.init({
   debug: false,
 
   ignoreErrors: [/WeakMap key undefined/i],
+
+  beforeSend: (event) => {
+    // Do not flag PostHog errors
+    if (
+      event.request?.url?.includes('/ingest/flags') ||
+      event.request?.url?.includes('/ingest/batch')
+    ) {
+      return null
+    }
+
+    return event
+  },
 })
 
 export const onRouterTransitionStart = Sentry.captureRouterTransitionStart

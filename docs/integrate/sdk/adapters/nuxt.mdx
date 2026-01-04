@@ -3,11 +3,31 @@ title: Nuxt
 description: Payments and Checkouts made dead simple with Nuxt
 ---
 
+## Examples
+
+- [With Nuxt](https://github.com/polarsource/examples/tree/main/with-nuxt)
+
 ## Installation
 
-Choose your preferred package manager to install the module:
+Install the required Polar packages using the following command:
 
-`pnpm add @polar-sh/nuxt`
+<Tabs>
+  <Tab title="npm">
+    ```bash Terminal
+    npm install zod @polar-sh/nuxt
+    ```
+  </Tab>
+  <Tab title="yarn">
+    ```bash Terminal
+    yarn add zod @polar-sh/nuxt
+    ```
+  </Tab>
+  <Tab title="pnpm">
+    ```bash Terminal
+    pnpm add zod @polar-sh/nuxt
+    ```
+  </Tab>
+</Tabs>
 
 ### Register the module
 
@@ -23,8 +43,7 @@ export default defineNuxtConfig({
 
 Create a Checkout handler which takes care of redirections.
 
-```typescript
-// server/routes/api/checkout.post.ts
+```typescript icon="square-js" server/routes/api/checkout.post.ts
 export default defineEventHandler((event) => {
   const {
     private: { polarAccessToken, polarCheckoutSuccessUrl, polarServer },
@@ -33,6 +52,7 @@ export default defineEventHandler((event) => {
   const checkoutHandler = Checkout({
     accessToken: polarAccessToken,
     successUrl: polarCheckoutSuccessUrl,
+    returnUrl: "https://myapp.com", // An optional URL which renders a back-button in the Checkout
     server: polarServer as "sandbox" | "production",
     theme: "dark", // Enforces the theme - System-preferred theme will be set if left omitted
   });
@@ -56,8 +76,7 @@ Pass query params to this route.
 
 Create a customer portal where your customer can view orders and subscriptions.
 
-```typescript
-// server/routes/api/portal.get.ts
+```typescript icon="square-js" server/routes/api/portal.get.ts
 export default defineEventHandler((event) => {
   const {
     private: { polarAccessToken, polarCheckoutSuccessUrl, polarServer },
@@ -65,6 +84,7 @@ export default defineEventHandler((event) => {
 
   const customerPortalHandler = CustomerPortal({
     accessToken: polarAccessToken,
+    returnUrl: "https://myapp.com", // An optional URL which renders a back-button in the Customer Portal
     server: polarServer as "sandbox" | "production",
     getCustomerId: (event) => {
       // Use your own logic to get the customer ID - from a database, session, etc.
@@ -80,8 +100,7 @@ export default defineEventHandler((event) => {
 
 A simple utility which resolves incoming webhook payloads by signing the webhook secret properly.
 
-```typescript
-// server/routes/webhook/polar.post.ts
+```typescript icon="square-js" server/routes/webhook/polar.post.ts
 export default defineEventHandler((event) => {
   const {
     private: { polarWebhookSecret },

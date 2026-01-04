@@ -3,7 +3,7 @@ from uuid import UUID
 from sqlalchemy import Select, select, update
 from sqlalchemy.orm import joinedload, selectinload
 
-from polar.auth.models import AuthSubject, Organization, User, is_organization, is_user
+from polar.auth.models import AuthSubject, User, is_organization, is_user
 from polar.kit.repository import (
     Options,
     RepositoryBase,
@@ -13,7 +13,13 @@ from polar.kit.repository import (
     SortingClause,
 )
 from polar.kit.utils import utc_now
-from polar.models import Checkout, CheckoutProduct, Product, UserOrganization
+from polar.models import (
+    Checkout,
+    CheckoutProduct,
+    Organization,
+    Product,
+    UserOrganization,
+)
 from polar.models.checkout import CheckoutStatus
 
 from .sorting import CheckoutSortProperty
@@ -52,12 +58,12 @@ class CheckoutRepository(
     def get_readable_statement(
         self, auth_subject: AuthSubject[User | Organization]
     ) -> Select[tuple[Checkout]]:
-        statement = self.get_base_statement().join(Checkout.product)
+        statement = self.get_base_statement()
 
         if is_user(auth_subject):
             user = auth_subject.subject
             statement = statement.where(
-                Product.organization_id.in_(
+                Checkout.organization_id.in_(
                     select(UserOrganization.organization_id).where(
                         UserOrganization.user_id == user.id,
                         UserOrganization.deleted_at.is_(None),
@@ -66,16 +72,16 @@ class CheckoutRepository(
             )
         elif is_organization(auth_subject):
             statement = statement.where(
-                Product.organization_id == auth_subject.subject.id,
+                Checkout.organization_id == auth_subject.subject.id,
             )
 
         return statement
 
     def get_eager_options(self) -> Options:
         return (
+            joinedload(Checkout.organization).joinedload(Organization.account),
             joinedload(Checkout.customer),
             joinedload(Checkout.product).options(
-                joinedload(Product.organization),
                 selectinload(Product.product_medias),
                 selectinload(Product.attached_custom_fields),
             ),
@@ -84,6 +90,9 @@ class CheckoutRepository(
                     selectinload(Product.product_medias),
                 )
             ),
+            joinedload(Checkout.subscription),
+            joinedload(Checkout.discount),
+            joinedload(Checkout.product_price),
         )
 
     def get_sorting_clause(self, property: CheckoutSortProperty) -> SortingClause:

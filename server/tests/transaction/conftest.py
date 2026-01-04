@@ -1,6 +1,5 @@
 from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
-from typing import TypeVar
 
 import pytest_asyncio
 
@@ -8,10 +7,13 @@ from polar.enums import SubscriptionRecurringInterval
 from polar.models import (
     Account,
     Customer,
+    Dispute,
     IssueReward,
     Order,
     Organization,
+    Payout,
     Pledge,
+    Refund,
     Transaction,
     User,
 )
@@ -35,14 +37,21 @@ async def create_transaction(
     payment_user: User | None = None,
     type: TransactionType = TransactionType.balance,
     amount: int = 1000,
+    tax_amount: int = 0,
+    currency: str = "usd",
     account_currency: str = "eur",
+    presentment_currency: str = "usd",
+    presentment_amount: int = 1000,
+    presentment_tax_amount: int = 0,
     pledge: Pledge | None = None,
     issue_reward: IssueReward | None = None,
     order: Order | None = None,
+    refund: Refund | None = None,
+    dispute: Dispute | None = None,
     payout_transaction: Transaction | None = None,
     payment_transaction: Transaction | None = None,
+    payout: Payout | None = None,
     charge_id: str | None = None,
-    refund_id: str | None = None,
     dispute_id: str | None = None,
     created_at: datetime | None = None,
 ) -> Transaction:
@@ -50,11 +59,14 @@ async def create_transaction(
         created_at=created_at,
         type=type,
         processor=Processor.stripe,
-        currency="usd",
+        currency=currency,
         amount=amount,
         account_currency=account_currency,
         account_amount=int(amount * 0.9) if account_currency != "usd" else amount,
-        tax_amount=0,
+        tax_amount=tax_amount,
+        presentment_currency=presentment_currency,
+        presentment_amount=presentment_amount,
+        presentment_tax_amount=presentment_tax_amount,
         account=account,
         payment_customer=payment_customer,
         payment_organization=payment_organization,
@@ -62,10 +74,12 @@ async def create_transaction(
         pledge=pledge,
         issue_reward=issue_reward,
         order=order,
+        refund=refund,
+        dispute=dispute,
         payout_transaction=payout_transaction,
         payment_transaction=payment_transaction,
+        payout=payout,
         charge_id=charge_id,
-        refund_id=refund_id,
         dispute_id=dispute_id,
         incurred_transactions=[],
     )
@@ -198,9 +212,6 @@ async def all_transactions(
     ]
 
 
-T = TypeVar("T")
-
-
-async def create_async_iterator(iterable: Sequence[T]) -> AsyncIterator[T]:
+async def create_async_iterator[T](iterable: Sequence[T]) -> AsyncIterator[T]:
     for item in iterable:
         yield item

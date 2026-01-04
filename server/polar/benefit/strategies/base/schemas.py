@@ -1,13 +1,13 @@
 from datetime import datetime
 
-from pydantic import UUID4, Field
+from pydantic import UUID4, Field, computed_field
 from pydantic.json_schema import SkipJsonSchema
 
 from polar.kit.metadata import MetadataInputMixin, MetadataOutputMixin
 from polar.kit.schemas import IDSchema, Schema, TimestampedSchema
 from polar.models.benefit import BenefitType
 from polar.models.benefit_grant import BenefitGrantError
-from polar.organization.schemas import Organization, OrganizationID
+from polar.organization.schemas import OrganizationID, OrganizationPublicBase
 
 BENEFIT_DESCRIPTION_MIN_LENGTH = 3
 BENEFIT_DESCRIPTION_MAX_LENGTH = 42
@@ -95,8 +95,9 @@ class BenefitGrantBase(IDSchema, TimestampedSchema):
     customer_id: UUID4 = Field(
         description="The ID of the customer concerned by this grant."
     )
-    user_id: SkipJsonSchema[UUID4] = Field(
-        validation_alias="customer_id", deprecated="Use `customer_id`."
+    member_id: UUID4 | None = Field(
+        default=None,
+        description="The ID of the member concerned by this grant.",
     )
     benefit_id: UUID4 = Field(
         description="The ID of the benefit concerned by this grant."
@@ -106,6 +107,13 @@ class BenefitGrantBase(IDSchema, TimestampedSchema):
         description="The error information if the benefit grant failed with an unrecoverable error.",
     )
 
+    @computed_field(deprecated="Use `customer_id`.")
+    def user_id(self) -> SkipJsonSchema[UUID4]:
+        return self.customer_id
+
+
+class BenefitSubscriberOrganization(OrganizationPublicBase): ...
+
 
 class BenefitSubscriberBase(BenefitBase):
-    organization: Organization
+    organization: BenefitSubscriberOrganization

@@ -12,11 +12,13 @@ from polar.models import (
     Customer,
     Order,
     Organization,
+    Payment,
     Product,
     Subscription,
     Transaction,
     UserOrganization,
 )
+from polar.models.dispute import DisputeStatus
 from polar.models.order import OrderStatus
 from polar.models.refund import RefundReason, RefundStatus
 from polar.models.subscription import SubscriptionStatus
@@ -38,6 +40,14 @@ def stripe_service_mock(mocker: MockerFixture) -> MagicMock:
     return mock
 
 
+@pytest.fixture(autouse=True)
+def refund_transaction_service_mock(mocker: MockerFixture) -> MagicMock:
+    mock = mocker.patch(
+        "polar.refund.service.refund_transaction_service", autospec=True
+    )
+    return mock
+
+
 async def create_order_and_payment(
     save_fixture: SaveFixture,
     *,
@@ -46,21 +56,26 @@ async def create_order_and_payment(
     amount: int,
     tax_amount: int,
     subscription: Subscription | None = None,
-    stripe_invoice_id: str | None = "INVOICE_ID",
-) -> tuple[Order, Transaction]:
+) -> tuple[Order, Payment, Transaction]:
     order = await ro.create_order(
         save_fixture,
         product=product,
         customer=customer,
         subtotal_amount=amount,
         tax_amount=tax_amount,
-        stripe_invoice_id=stripe_invoice_id,
         subscription=subscription,
     )
-    payment = await ro.create_payment_transaction(
-        save_fixture, amount=amount, tax_amount=tax_amount, order=order
+    payment = await ro.create_payment(
+        save_fixture, product.organization, amount=amount + tax_amount, order=order
     )
-    return order, payment
+    transaction = await ro.create_payment_transaction(
+        save_fixture,
+        amount=amount,
+        tax_amount=tax_amount,
+        order=order,
+        charge_id=payment.processor_id,
+    )
+    return order, payment, transaction
 
 
 @pytest.mark.asyncio
@@ -77,29 +92,28 @@ class TestListRefunds(StripeRefund):
         product: Product,
         customer: Customer,
         customer_second: Customer,
+        customer_organization_second: Customer,
     ) -> tuple[Order, Order, Order]:
-        order, _ = await create_order_and_payment(
+        order, payment, _ = await create_order_and_payment(
             save_fixture,
             product=product,
             customer=customer,
             amount=1000,
             tax_amount=250,
         )
-        order_second, _ = await create_order_and_payment(
+        order_second, payment_second, _ = await create_order_and_payment(
             save_fixture,
             product=product,
             customer=customer,
             amount=1000,
             tax_amount=250,
-            stripe_invoice_id="STRIPE_SECOND_INVOICE_ID",
         )
-        order_second_org, _ = await create_order_and_payment(
+        order_second_org, payment_second_org, _ = await create_order_and_payment(
             save_fixture,
             product=product_organization_second,
-            customer=customer,
+            customer=customer_organization_second,
             amount=1000,
             tax_amount=250,
-            stripe_invoice_id="STRIPE_SECOND_ORG_INVOICE_ID",
         )
 
         def refund_id() -> str:
@@ -110,6 +124,7 @@ class TestListRefunds(StripeRefund):
         await ro.create_refund(
             save_fixture,
             order,
+            payment,
             status=RefundStatus.pending,
             amount=80,
             tax_amount=20,
@@ -118,6 +133,7 @@ class TestListRefunds(StripeRefund):
         await ro.create_refund(
             save_fixture,
             order,
+            payment,
             status=RefundStatus.succeeded,
             amount=80,
             tax_amount=20,
@@ -126,6 +142,7 @@ class TestListRefunds(StripeRefund):
         await ro.create_refund(
             save_fixture,
             order,
+            payment,
             status=RefundStatus.succeeded,
             amount=160,
             tax_amount=40,
@@ -134,6 +151,7 @@ class TestListRefunds(StripeRefund):
         await ro.create_refund(
             save_fixture,
             order,
+            payment,
             status=RefundStatus.succeeded,
             amount=160,
             tax_amount=40,
@@ -143,6 +161,7 @@ class TestListRefunds(StripeRefund):
         await ro.create_refund(
             save_fixture,
             order_second,
+            payment_second,
             status=RefundStatus.succeeded,
             amount=240,
             tax_amount=60,
@@ -151,16 +170,35 @@ class TestListRefunds(StripeRefund):
         await ro.create_refund(
             save_fixture,
             order_second,
+            payment_second,
             status=RefundStatus.succeeded,
             amount=240,
             tax_amount=60,
             processor_id=refund_id(),
+        )
+        dispute = await ro.create_dispute(
+            save_fixture,
+            order=order_second,
+            payment=payment_second,
+            status=DisputeStatus.prevented,
+        )
+        await ro.create_refund(
+            save_fixture,
+            order_second,
+            payment_second,
+            status=RefundStatus.succeeded,
+            reason=RefundReason.dispute_prevention,
+            amount=240,
+            tax_amount=60,
+            processor_id=refund_id(),
+            dispute=dispute,
         )
 
         # Second organization order
         await ro.create_refund(
             save_fixture,
             order_second_org,
+            payment_second_org,
             status=RefundStatus.succeeded,
             amount=1000,
             tax_amount=250,
@@ -175,7 +213,7 @@ class TestListRefunds(StripeRefund):
         response = await client.get("/v1/refunds/")
         assert response.status_code == 401
 
-    @pytest.mark.auth()
+    @pytest.mark.auth
     async def test_valid(
         self,
         session: AsyncSession,
@@ -188,6 +226,7 @@ class TestListRefunds(StripeRefund):
         product: Product,
         customer: Customer,
         customer_second: Customer,
+        customer_organization_second: Customer,
     ) -> None:
         order, order_second, _ = await self.seed_refunds(
             session,
@@ -200,12 +239,13 @@ class TestListRefunds(StripeRefund):
             product,
             customer,
             customer_second,
+            customer_organization_second,
         )
 
         # Get all for organization
         response = await client.get("/v1/refunds/")
         json = response.json()
-        assert json["pagination"]["total_count"] == 6
+        assert json["pagination"]["total_count"] == 7
 
         # Get all succeeded for first order
         response = await client.get(
@@ -218,7 +258,7 @@ class TestListRefunds(StripeRefund):
         json = response.json()
         assert json["pagination"]["total_count"] == 3
 
-        # Get all for organization
+        # Get non-succeeded refunds
         response = await client.get(
             "/v1/refunds/",
             params={
@@ -226,14 +266,13 @@ class TestListRefunds(StripeRefund):
             },
         )
         json = response.json()
-        assert json["pagination"]["total_count"] == 6
+        assert json["pagination"]["total_count"] == 1
 
         # Get all for first order regardless of status
         response = await client.get(
             "/v1/refunds/",
             params={
                 "order_id": str(order.id),
-                "succeeded": False,
             },
         )
         json = response.json()
@@ -248,7 +287,7 @@ class TestListRefunds(StripeRefund):
             },
         )
         json = response.json()
-        assert json["pagination"]["total_count"] == 2
+        assert json["pagination"]["total_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -259,7 +298,7 @@ class TestCreateRefunds(StripeRefund):
         response = await client.post("/v1/refunds/")
         assert response.status_code == 401
 
-    @pytest.mark.auth()
+    @pytest.mark.auth
     async def test_tampered(
         self,
         session: AsyncSession,
@@ -273,7 +312,7 @@ class TestCreateRefunds(StripeRefund):
         customer_organization_second: Customer,
     ) -> None:
         # Complex Swedish order. $99.9 with 25% VAT = $24.75
-        order, payment = await create_order_and_payment(
+        order, payment, transaction = await create_order_and_payment(
             save_fixture,
             product=product_organization_second,
             customer=customer_organization_second,
@@ -285,7 +324,7 @@ class TestCreateRefunds(StripeRefund):
             client,
             stripe_service_mock,
             order,
-            payment,
+            transaction,
             RefundCreate(
                 order_id=order.id,
                 reason=RefundReason.service_disruption,
@@ -307,7 +346,7 @@ class TestCreateRefunds(StripeRefund):
         assert updated.refunded_tax_amount == 0
 
     @pytest.mark.auth(
-        AuthSubjectFixture(scopes={Scope.web_default}),
+        AuthSubjectFixture(scopes={Scope.web_write}),
         AuthSubjectFixture(scopes={Scope.refunds_write}),
     )
     async def test_valid_partial_to_full(
@@ -322,7 +361,7 @@ class TestCreateRefunds(StripeRefund):
         customer: Customer,
     ) -> None:
         # Complex Swedish order. $99.9 with 25% VAT = $24.75
-        order, payment = await create_order_and_payment(
+        order, payment, transaction = await create_order_and_payment(
             save_fixture,
             product=product,
             customer=customer,
@@ -337,13 +376,12 @@ class TestCreateRefunds(StripeRefund):
             client,
             stripe_service_mock,
             order,
-            payment,
+            transaction,
             amount=1110,
             # Rounded up from 277.5
             tax=278,
         )
         assert order.status == OrderStatus.partially_refunded
-        await self.assert_transaction_amounts_from_response(session, response)
 
         # 8_880 remaining
         order, response = await self.create_order_refund(
@@ -351,13 +389,12 @@ class TestCreateRefunds(StripeRefund):
             client,
             stripe_service_mock,
             order,
-            payment,
+            transaction,
             amount=993,
             # Rounded down from 248.25
             tax=248,
         )
         assert order.status == OrderStatus.partially_refunded
-        await self.assert_transaction_amounts_from_response(session, response)
 
         # 7_887 remaining
         order, response = await self.create_order_refund(
@@ -365,13 +402,12 @@ class TestCreateRefunds(StripeRefund):
             client,
             stripe_service_mock,
             order,
-            payment,
+            transaction,
             amount=5887,
             # Rounds up from 1471.75
             tax=1472,
         )
         assert order.status == OrderStatus.partially_refunded
-        await self.assert_transaction_amounts_from_response(session, response)
 
         # 2_000 remaining
         amount_before_exceed_attempt = order.refunded_amount
@@ -380,7 +416,7 @@ class TestCreateRefunds(StripeRefund):
             client,
             stripe_service_mock,
             order,
-            payment,
+            transaction,
             RefundCreate(
                 order_id=order.id,
                 reason=RefundReason.service_disruption,
@@ -392,7 +428,7 @@ class TestCreateRefunds(StripeRefund):
             # Rounds down from 500.25
             refund_tax_amount=500,
         )
-        assert response.status_code == 400
+        assert response.status_code == 422
 
         order_repository = OrderRepository.from_session(session)
         updated = await order_repository.get_by_id(order.id)
@@ -407,16 +443,15 @@ class TestCreateRefunds(StripeRefund):
             client,
             stripe_service_mock,
             order,
-            payment,
+            transaction,
             amount=2000,
             tax=order.tax_amount - order.refunded_tax_amount,
         )
-        await self.assert_transaction_amounts_from_response(session, response)
         assert order.status == OrderStatus.refunded
         assert order.refunded
 
     @pytest.mark.auth(
-        AuthSubjectFixture(scopes={Scope.web_default}),
+        AuthSubjectFixture(scopes={Scope.web_write}),
         AuthSubjectFixture(scopes={Scope.refunds_write}),
     )
     async def test_valid_full_refund(
@@ -432,7 +467,7 @@ class TestCreateRefunds(StripeRefund):
     ) -> None:
         order_amount = 2000
         order_tax_amount = 500
-        order, payment = await create_order_and_payment(
+        order, payment, transaction = await create_order_and_payment(
             save_fixture,
             product=product,
             customer=customer,
@@ -448,11 +483,10 @@ class TestCreateRefunds(StripeRefund):
             client,
             stripe_service_mock,
             order,
-            payment,
+            transaction,
             amount=order_amount,
             tax=order_tax_amount,
         )
-        await self.assert_transaction_amounts_from_response(session, response)
         assert order.status == OrderStatus.refunded
         assert order.refunded_amount == order_amount
         assert order.refunded_tax_amount == order_tax_amount
@@ -461,7 +495,7 @@ class TestCreateRefunds(StripeRefund):
 
 @pytest.mark.asyncio
 class TestCreateRefundsAndRevokeBenefits(StripeRefund):
-    @pytest.mark.auth()
+    @pytest.mark.auth
     async def test_disallow_subscriptions(
         self,
         session: AsyncSession,
@@ -480,7 +514,7 @@ class TestCreateRefundsAndRevokeBenefits(StripeRefund):
             status=SubscriptionStatus.active,
             customer=customer,
         )
-        order, payment = await create_order_and_payment(
+        order, payment, transaction = await create_order_and_payment(
             save_fixture,
             product=product,
             customer=customer,
@@ -504,7 +538,7 @@ class TestCreateRefundsAndRevokeBenefits(StripeRefund):
         assert response.status_code == 400
         assert enqueue_revoke_benefits.call_count == 0
 
-    @pytest.mark.auth()
+    @pytest.mark.auth
     async def test_valid(
         self,
         session: AsyncSession,
@@ -517,7 +551,7 @@ class TestCreateRefundsAndRevokeBenefits(StripeRefund):
         product: Product,
         customer: Customer,
     ) -> None:
-        order, payment = await create_order_and_payment(
+        order, payment, transaction = await create_order_and_payment(
             save_fixture,
             product=product,
             customer=customer,
@@ -531,7 +565,7 @@ class TestCreateRefundsAndRevokeBenefits(StripeRefund):
 
         stripe_refund = build_stripe_refund(
             amount=125,
-            charge_id=payment.charge_id,
+            charge_id=payment.processor_id,
         )
         stripe_service_mock.create_refund.return_value = stripe_refund
         # Get all for second order

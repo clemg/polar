@@ -1,7 +1,14 @@
 'use client'
 
 import { cn } from '@/lib/utils'
-import { ComponentProps, useState } from 'react'
+import {
+  ComponentProps,
+  ComponentType,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
 
 const Avatar = ({
   name,
@@ -9,12 +16,16 @@ const Avatar = ({
   className,
   height,
   width,
+  loading = 'eager',
+  CustomImageComponent,
 }: {
   name: string
   avatar_url: string | null
   className?: string
   height?: number | undefined
   width?: number | undefined
+  loading?: React.ImgHTMLAttributes<HTMLImageElement>['loading']
+  CustomImageComponent?: ComponentType<any> // Used mainly to pass next/image
 }) => {
   const initials = getInitials(name)
 
@@ -24,23 +35,37 @@ const Avatar = ({
   const [hasLoaded, setHasLoaded] = useState(false)
   const [showInitials, setShowInitials] = useState(avatar_url === null)
 
-  const onLoad = () => {
+  const onLoad = useCallback(() => {
     setHasLoaded(true)
     setShowInitials(false)
-  }
+  }, [setHasLoaded, setShowInitials])
 
-  const onError = () => {
+  const imgRef = useRef<HTMLImageElement>(null)
+
+  const onError = useCallback(() => {
     setShowInitials(true)
     setHasLoaded(true)
-  }
+  }, [setHasLoaded, setShowInitials])
+
+  // We need to look at the `.complete`-property on the <img>
+  // in order to detect resources in the cache.
+  useEffect(() => {
+    if (imgRef.current && imgRef.current.complete) {
+      setHasLoaded(true)
+      setShowInitials(false)
+    }
+  }, [imgRef.current])
+
+  const ImageElement = CustomImageComponent || 'img'
 
   return (
     <div
       className={cn(
-        'dark:bg-polar-900 dark:border-polar-700 relative z-[2] flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border-2 border-gray-200 bg-gray-50 text-sm',
+        'dark:bg-polar-900 dark:border-polar-700 dark:text-polar-500 relative z-2 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gray-50 font-sans text-[10px] text-gray-700',
         className,
       )}
     >
+      <span className="absolute inset-0 z-2 rounded-full ring ring-black/10 ring-inset dark:ring-white/10"></span>
       {!avatar_url || showInitials ? (
         <div className="absolute inset-0 flex items-center justify-center bg-transparent">
           <span>{initials}</span>
@@ -48,15 +73,17 @@ const Avatar = ({
       ) : (
         <>
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
+          <ImageElement
+            ref={imgRef}
             alt={name}
             src={avatar_url}
             height={height}
             width={width}
+            loading={loading}
             onLoad={onLoad}
             onError={onError}
             className={cn(
-              'z-[1] aspect-square rounded-full object-cover',
+              'z-1 aspect-square rounded-full object-cover',
               hasLoaded ? 'opacity-100' : 'opacity-0',
             )}
           />
@@ -73,7 +100,12 @@ const AvatarWrapper = (props: ComponentProps<typeof Avatar>) => {
 export default AvatarWrapper
 
 const getInitials = (fullName: string) => {
-  const allNames = fullName.trim().split(' ')
+  const allNames = fullName
+    .split('@')[0] // In case it's passed an email
+    .replace(/[^a-zA-Z ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
   const initials = allNames.reduce((acc, curr, index) => {
     if (index === 0 || index === allNames.length - 1) {
       acc = `${acc}${curr.charAt(0).toUpperCase()}`

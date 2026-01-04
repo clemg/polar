@@ -2,10 +2,12 @@ import hashlib
 from datetime import datetime
 from typing import Annotated
 
+from annotated_types import MaxLen
 from fastapi import Path
 from pydantic import UUID4, Field, computed_field
 
-from polar.kit.address import Address
+from polar.config import settings
+from polar.kit.address import Address, AddressInput
 from polar.kit.email import EmailStrDNS
 from polar.kit.metadata import (
     MetadataInputMixin,
@@ -14,11 +16,13 @@ from polar.kit.metadata import (
 from polar.kit.schemas import (
     CUSTOMER_ID_EXAMPLE,
     ORGANIZATION_ID_EXAMPLE,
+    EmptyStrToNoneValidator,
     IDSchema,
     Schema,
     TimestampedSchema,
 )
 from polar.kit.tax import TaxID
+from polar.member import Member, OwnerCreate
 from polar.organization.schemas import OrganizationID
 
 CustomerID = Annotated[UUID4, Path(description="The customer ID.")]
@@ -37,9 +41,16 @@ _email_example = "customer@example.com"
 _name_description = "The name of the customer."
 _name_example = "John Doe"
 
+CustomerNameInput = Annotated[
+    str,
+    MaxLen(256),
+    Field(description=_name_description, examples=[_name_example]),
+    EmptyStrToNoneValidator,
+]
+
 
 class CustomerCreate(MetadataInputMixin, Schema):
-    external_id: str | None = Field(
+    external_id: Annotated[str | None, EmptyStrToNoneValidator] = Field(
         default=None,
         description=_external_id_description,
         examples=[_external_id_example],
@@ -47,10 +58,8 @@ class CustomerCreate(MetadataInputMixin, Schema):
     email: EmailStrDNS = Field(
         description=_email_description, examples=[_email_example]
     )
-    name: str | None = Field(
-        default=None, description=_name_description, examples=[_name_example]
-    )
-    billing_address: Address | None = None
+    name: CustomerNameInput | None = None
+    billing_address: AddressInput | None = None
     tax_id: TaxID | None = None
     organization_id: OrganizationID | None = Field(
         default=None,
@@ -59,21 +68,27 @@ class CustomerCreate(MetadataInputMixin, Schema):
             "**Required unless you use an organization token.**"
         ),
     )
+    owner: OwnerCreate | None = Field(
+        default=None,
+        description=(
+            "Optional owner member to create with the customer. "
+            "If not provided, an owner member will be automatically created "
+            "using the customer's email and name."
+        ),
+    )
 
 
 class CustomerUpdateBase(MetadataInputMixin, Schema):
     email: EmailStrDNS | None = Field(
         default=None, description=_email_description, examples=[_email_example]
     )
-    name: str | None = Field(
-        default=None, description=_name_description, examples=[_name_example]
-    )
-    billing_address: Address | None = None
+    name: CustomerNameInput | None = None
+    billing_address: AddressInput | None = None
     tax_id: TaxID | None = None
 
 
 class CustomerUpdate(CustomerUpdateBase):
-    external_id: str | None = Field(
+    external_id: Annotated[str | None, EmptyStrToNoneValidator] = Field(
         default=None,
         description=_external_id_description,
         examples=[_external_id_example],
@@ -113,9 +128,26 @@ class CustomerBase(MetadataOutputMixin, TimestampedSchema, IDSchema):
 
     @computed_field(examples=["https://www.gravatar.com/avatar/xxx?d=404"])
     def avatar_url(self) -> str:
-        email_hash = hashlib.sha256(self.email.lower().encode()).hexdigest()
-        return f"https://www.gravatar.com/avatar/{email_hash}?d=404"
+        domain = self.email.split("@")[-1].lower()
+
+        if (
+            not settings.LOGO_DEV_PUBLISHABLE_KEY
+            or domain in settings.PERSONAL_EMAIL_DOMAINS
+        ):
+            email_hash = hashlib.sha256(self.email.lower().encode()).hexdigest()
+            return f"https://www.gravatar.com/avatar/{email_hash}?d=404"
+
+        return f"https://img.logo.dev/{domain}?size=64&retina=true&token={settings.LOGO_DEV_PUBLISHABLE_KEY}&fallback=404"
 
 
 class Customer(CustomerBase):
     """A customer in an organization."""
+
+
+class CustomerWithMembers(Customer):
+    """A customer in an organization with their members loaded."""
+
+    members: list[Member] = Field(
+        default_factory=list,
+        description="List of members belonging to this customer.",
+    )

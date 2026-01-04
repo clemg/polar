@@ -1,4 +1,3 @@
-import structlog
 from fastapi import Depends, Query
 
 from polar.customer.schemas.customer import CustomerID
@@ -15,13 +14,11 @@ from polar.subscription.schemas import SubscriptionID
 from . import auth
 from .schemas import Refund as RefundSchema
 from .schemas import RefundCreate, RefundID
-from .service import RefundAmountTooHigh, RefundedAlready
+from .service import RefundedAlready
 from .service import refund as refund_service
 from .sorting import RefundListSorting
 
-log = structlog.get_logger()
-
-router = APIRouter(prefix="/refunds", tags=["refunds", APITag.documented])
+router = APIRouter(prefix="/refunds", tags=["refunds", APITag.public])
 
 
 @router.get("/", summary="List Refunds", response_model=ListResource[RefundSchema])
@@ -51,8 +48,8 @@ async def list(
     ),
     session: AsyncSession = Depends(get_db_session),
 ) -> ListResource[RefundSchema]:
-    """List products."""
-    results, count = await refund_service.get_list(
+    """List refunds."""
+    results, count = await refund_service.list(
         session,
         auth_subject,
         id=id,
@@ -78,10 +75,6 @@ async def list(
     response_model=RefundSchema,
     responses={
         201: {"description": "Refund created."},
-        400: {
-            "description": "Refund amount exceeds remaining order balance.",
-            "model": RefundAmountTooHigh.schema(),
-        },
         403: {
             "description": "Order is already fully refunded.",
             "model": RefundedAlready.schema(),
